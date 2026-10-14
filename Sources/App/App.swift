@@ -26,8 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // 主窗口控件
     var mainWin: NSWindow?
     var axLabel = NSTextField(), scLabel = NSTextField()
-    var winPopup = NSPopUpButton(), spacePopup = NSPopUpButton(), sidePopup = NSPopUpButton(), pinPopup = NSPopUpButton()
+    var winPopup = NSPopUpButton(), spacePopup = NSPopUpButton(), sidePopup = NSPopUpButton()
     var sizeField = NSTextField()
+    let pinsStack = NSStackView()   // 正在悬浮：每个窗口一行
+    var mainStack = NSStackView()
     var listedWins: [Win] = []
     var allowMulti = false          // 是否允许同时悬浮多个窗口
     var multiBox = NSButton()
@@ -249,14 +251,8 @@ extension AppDelegate {
             self?.notify("PinTop", restore())
         }
 
-        // 正在悬浮
-        pinPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        pinPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stopBtn = ClosureButton("取消所选") { [weak self] in
-            guard let self = self, self.pinPopup.indexOfSelectedItem >= 0,
-                  let id = self.pinPopup.selectedItem?.representedObject as? UInt32 else { return }
-            self.stopPin(id); self.refreshMain()
-        }
+        // 正在悬浮：每个窗口一行（见 refreshMain）
+        pinsStack.orientation = .vertical; pinsStack.alignment = .leading; pinsStack.spacing = 4
         let stopAll = ClosureButton("全部取消") { [weak self] in
             guard let self = self else { return }
             for id in Array(self.pins.keys) { self.stopPin(id) }
@@ -279,17 +275,18 @@ extension AppDelegate {
             header("1. 选择窗口"), row([winPopup, refresh]),
             header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),
             header("   或：并排布局（把窗口摆到屏幕一侧）"), row([sidePopup, sizeField, dockBtn, restoreBtn]),
-            header("正在悬浮"), row([pinPopup, stopBtn, stopAll]), multiBox,
+            header("正在悬浮"), pinsStack, row([stopAll, multiBox]),
             tip,
         ])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         stack.setCustomSpacing(14, after: stack.views[2]); stack.setCustomSpacing(14, after: stack.views[4])
         stack.setCustomSpacing(14, after: stack.views[8])
-        for v in [stack.views[1], stack.views[2], stack.views[4], stack.views[6], stack.views[8], stack.views[10]] {
+        for v in [stack.views[1], stack.views[2], stack.views[4], stack.views[6], stack.views[8]] {
             v.widthAnchor.constraint(equalToConstant: 440).isActive = true
         }
         tip.preferredMaxLayoutWidth = 440
+        mainStack = stack
         w.contentView = stack
         w.setContentSize(stack.fittingSize)
         w.center()
@@ -328,13 +325,26 @@ extension AppDelegate {
         if let k = keep, let idx = listedWins.firstIndex(where: { $0.id == k }) { winPopup.selectItem(at: idx) }
         if listedWins.isEmpty { winPopup.addItem(withTitle: "（没有可操作的窗口）") }
 
-        pinPopup.removeAllItems()
+        // 正在悬浮：逐行列出，每行一个取消按钮
+        pinsStack.arrangedSubviews.forEach { pinsStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+        if pins.isEmpty {
+            let none = NSTextField(labelWithString: "（无）"); none.textColor = .secondaryLabelColor
+            pinsStack.addArrangedSubview(none)
+        }
         for (id, _) in pins.sorted(by: { $0.key < $1.key }) {
             let info = pinInfo[id]
-            let it = NSMenuItem(title: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.all == true ? "所有桌面" : "当前桌面")）", action: nil, keyEquivalent: "")
-            it.representedObject = id
-            pinPopup.menu?.addItem(it)
+            let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.all == true ? "所有桌面" : "当前桌面")）")
+            name.lineBreakMode = .byTruncatingTail
+            name.widthAnchor.constraint(equalToConstant: 340).isActive = true
+            let cancel = ClosureButton("取消") { [weak self] in self?.stopPin(id); self?.refreshMain() }
+            pinsStack.addArrangedSubview(row([name, cancel]))
         }
-        if pins.isEmpty { pinPopup.addItem(withTitle: "（无）") }
+        // 窗口高度随内容变化，保持左上角不动
+        if let w = mainWin {
+            let old = w.frame
+            w.setContentSize(mainStack.fittingSize)
+            var f = w.frame; f.origin.y = old.maxY - f.height
+            w.setFrame(f, display: true)
+        }
     }
 }
