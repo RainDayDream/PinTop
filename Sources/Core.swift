@@ -139,9 +139,9 @@ func record(_ w: Win) -> Saved {
     Saved(pid: w.pid, wid: w.id, x: w.bounds.minX, y: w.bounds.minY, w: w.bounds.width, h: w.bounds.height)
 }
 
-func restore() {
+func restore() -> String {
     let items = load()
-    guard !items.isEmpty else { print("没有可恢复的记录"); return }
+    guard !items.isEmpty else { return "没有可恢复的记录" }
     let all = pinnableWindows()
     var ok = 0
     for it in items {
@@ -149,7 +149,7 @@ func restore() {
         if setFrame(ax, CGRect(x: it.x, y: it.y, width: it.w, height: it.h)) { ok += 1 }
     }
     try? FileManager.default.removeItem(at: stateURL)
-    print("已恢复 \(ok)/\(items.count) 个窗口（已关闭的窗口会被跳过）")
+    return "已恢复 \(ok)/\(items.count) 个窗口（已关闭的窗口会被跳过）"
 }
 
 // MARK: - 镜像悬浮窗
@@ -172,6 +172,8 @@ final class MirrorView: NSView {
 
 /// 目标窗口被盖住时，在最上层显示它的实时画面；点击时激活真窗口并转发鼠标操作。
 final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
+    /// 当前所有正在悬浮的窗口ID：多个悬浮窗口之间互不视为“盖住”对方，避免互相抢占
+    static var pinned = Set<CGWindowID>()
     let target: Win
     let allSpaces: Bool
     let panel: Panel
@@ -187,6 +189,10 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     var candidate = CGRect.zero
     var lastBuffer: CVPixelBuffer?
     let debug = ProcessInfo.processInfo.environment["PINTOP_DEBUG"] != nil
+    var onStop: ((String) -> Void)?   // 悬浮结束（窗口关闭/捕获失败）时回调，参数为原因
+    var timer: Timer?
+    var observer: NSObjectProtocol?
+    var stopped = false
 
     init(target: Win, allSpaces: Bool) {
         self.target = target; self.allSpaces = allSpaces
@@ -201,13 +207,39 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         view.owner = self
         panel.contentView = view
         // 切换桌面后，重新应用桌面行为并强制重新显示（all 模式）
-        NSWorkspace.shared.notificationCenter.addObserver(
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.allSpaces else { return }
+            guard let self = self, self.allSpaces, !self.stopped else { return }
             self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.tick() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.tick() }
         }
+    }
+
+    /// 开始捕获并跟踪目标窗口
+    func begin() {
+        Mirror.pinned.insert(target.id)
+        Task { @MainActor in
+            do { try await self.start() } catch { self.finish("启动失败：\(error.localizedDescription)") }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    /// 停止悬浮并释放资源（不触发 onStop）
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        Mirror.pinned.remove(target.id)
+        timer?.invalidate(); timer = nil
+        if let o = observer { NSWorkspace.shared.notificationCenter.removeObserver(o); observer = nil }
+        panel.orderOut(nil); panel.close()
+        if let s = stream { Task { try? await s.stopCapture() } }
+        stream = nil
+    }
+
+    func finish(_ reason: String) {
+        guard !stopped else { return }
+        stop(); onStop?(reason)
     }
 
     func configure(_ size: CGSize) {
@@ -247,15 +279,16 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ s: SCStream, didStopWithError error: Error) {
-        print("屏幕捕获已停止：\(error.localizedDescription)"); exit(1)
+        DispatchQueue.main.async { self.finish("屏幕捕获已停止：\(error.localizedDescription)") }
     }
 
     func nsFrame(_ r: CGRect) -> NSRect { NSRect(x: r.minX, y: primaryH - r.maxY, width: r.width, height: r.height) }
 
     func tick() {
+        if stopped { return }
         let all = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         guard all.contains(where: { ($0[kCGWindowNumber as String] as? UInt32) == target.id }) else {
-            print("目标窗口已关闭，退出。"); exit(0)
+            finish("目标窗口已关闭"); return
         }
         let wins = pinnableWindows()
         var bounds = lastFrame
@@ -270,7 +303,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let i = wins.firstIndex(where: { $0.id == target.id }) {
             realOnScreen = true; bounds = wins[i].bounds
-            show = wins[..<i].contains { $0.bounds.width > 40 && $0.bounds.height > 40 && $0.bounds.intersects(bounds) }
+            show = wins[..<i].contains { !Mirror.pinned.contains($0.id) && $0.bounds.width > 40 && $0.bounds.height > 40 && $0.bounds.intersects(bounds) }
         } else {
             realOnScreen = false; show = allSpaces       // 在其他桌面/已最小化
         }
@@ -314,7 +347,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         let pt = CGPoint(x: loc.x, y: primaryH - loc.y)
         let n = Int64(e.clickCount)
         let isDown = (t == .leftMouseDown || t == .rightMouseDown)
-        if isDown { pressed = true; activateTarget() }
+        if isDown { pressed = true; activateTarget(); panel.orderFrontRegardless() }   // 最近点击的镜像排在其他镜像之上
         if t == .leftMouseUp || t == .rightMouseUp { pressed = false }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in     // 等激活生效；统一延迟保证事件顺序
             if isDown, let ax = axWindow(target) { AXUIElementPerformAction(ax, kAXRaiseAction as CFString) }
@@ -337,127 +370,35 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-func floatCmd(_ t: Win, allSpaces: Bool) -> Never {
-    ensureAccessibility()
-    if !CGPreflightScreenCaptureAccess() {
-        _ = CGRequestScreenCaptureAccess()
-        print("需要“屏幕录制”权限：系统设置 → 隐私与安全性 → 屏幕录制 → 允许当前终端 App，然后重启终端并重新运行。")
-        exit(1)
-    }
-    let app = NSApplication.shared
-    app.setActivationPolicy(.accessory)                  // 无 Dock 图标
-    let m = Mirror(target: t, allSpaces: allSpaces)
-    Task { do { try await m.start() } catch { print("启动失败：\(error.localizedDescription)"); exit(1) } }
-    Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in m.tick() }
-    signal(SIGINT) { _ in print("\n已取消悬浮。"); exit(0) }
-    signal(SIGTERM) { _ in exit(0) }
-    print("悬浮中：\(t.app) — \(displayTitle(t))  模式：\(allSpaces ? "所有桌面" : "当前桌面")。按 Ctrl+C 退出。")
-    app.run()
-    exit(0)
-}
-
-// MARK: - 命令
-func ensureAccessibility() {
-    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-    if !AXIsProcessTrustedWithOptions(opts) {
-        print("需要“辅助功能”权限：系统设置 → 隐私与安全性 → 辅助功能 → 允许当前终端 App，然后重新运行。")
-        exit(1)
-    }
-}
-
-func dock(target: Win, side: Side?, amount: String, frame: String?, fit: [Win]) {
-    ensureAccessibility()
+// MARK: - 并排布局
+/// 摆放窗口；返回 (是否成功, 提示信息)。不会终止进程。
+func applyDock(target: Win, side: Side?, amount: String, frame: String?, fit: [Win]) -> (ok: Bool, messages: [String]) {
     let area = usableArea(for: target.bounds)
-    var targetRect: CGRect
+    var msgs: [String] = []
+    let targetRect: CGRect
     var rest: CGRect? = nil
     if let f = frame {
-        guard let r = parseFrame(f, area: area) else { print("--frame 格式应为 x,y,w,h（像素或百分比）"); exit(1) }
+        guard let r = parseFrame(f, area: area) else { return (false, ["--frame 格式应为 x,y,w,h（像素或百分比）"]) }
         targetRect = r
     } else {
-        guard let s = side, let parts = split(area, side: s, amount: amount) else { print("无法解析位置/大小参数"); exit(1) }
+        guard let s = side, let parts = split(area, side: s, amount: amount) else { return (false, ["无法解析位置/大小参数"]) }
         targetRect = parts.0; rest = parts.1
     }
-    guard let ax = axWindow(target) else { print("无法访问该窗口（可能已关闭）"); exit(1) }
-    print("可用区域 \(area.integral)  原窗口 \(target.bounds.integral)  目标 \(targetRect.integral)")
+    guard let ax = axWindow(target) else { return (false, ["无法访问该窗口（可能已关闭）"]) }
     save([record(target)] + fit.map(record))
-    print(setFrame(ax, targetRect) ? "已摆放：\(target.app)" : "⚠️ 该窗口拒绝被调整大小/位置（例如全屏或固定大小的窗口）")
+    let ok = setFrame(ax, targetRect)
+    msgs.append(ok ? "已摆放：\(target.app)" : "该窗口拒绝被调整大小/位置（例如全屏或固定大小的窗口）")
     if !fit.isEmpty {
-        guard let rest = rest else { print("--frame 模式下不支持 --fit"); return }
-        for w in fit {
-            guard let a = axWindow(w) else { continue }
-            print(setFrame(a, rest) ? "已放入剩余区域：\(w.app)" : "⚠️ \(w.app) 拒绝被调整")
-        }
+        if let rest = rest {
+            for w in fit {
+                guard let a = axWindow(w) else { continue }
+                msgs.append(setFrame(a, rest) ? "已放入剩余区域：\(w.app)" : "\(w.app) 拒绝被调整")
+            }
+        } else { msgs.append("--frame 模式下不支持 --fit") }
     }
-    if let a = axWindow(target) {
-        var ref: CFTypeRef?; var p = CGPoint.zero, z = CGSize.zero
-        if AXUIElementCopyAttributeValue(a, kAXPositionAttribute as CFString, &ref) == .success { AXValueGetValue(ref as! AXValue, .cgPoint, &p) }
-        if AXUIElementCopyAttributeValue(a, kAXSizeAttribute as CFString, &ref) == .success { AXValueGetValue(ref as! AXValue, .cgSize, &z) }
-        print("实际结果 位置 \(p) 大小 \(z)")
-    }
-    print("完成。可自由拖动/缩放；运行 ./pintop restore 恢复原位置。")
+    return (ok, msgs)
 }
 
-func usage() {
-    print("""
-    pintop — 并排布局：把窗口摆到屏幕指定位置/大小（摆完即退出，不常驻）
-
-      pintop                                   交互式
-      pintop list                              列出窗口ID
-      pintop float <ID> [--all]                镜像悬浮：被盖住时在最上层显示实时画面（--all=所有桌面）
-      pintop dock <ID> --right 35%             靠右，占 35% 宽（还可用 --left/--top/--bottom，也可写像素如 600）
-      pintop dock <ID> --frame x,y,w,h         任意区域（像素或百分比，相对可用屏幕区域）
-      pintop dock <ID> --right 35% --fit <ID2>[,<ID3>]   同时把其他窗口放进剩余区域（会改变它们的大小）
-      pintop restore                           恢复之前被移动的窗口
-    """)
-}
-
-func interactive() {
-    let wins = pinnableWindows()
-    guard !wins.isEmpty else { print("没有可操作的窗口"); exit(1) }
-    ensureAccessibility()
-    for (i, w) in wins.enumerated() { print("[\(i + 1)] \(w.app) — \(displayTitle(w))") }
-    print("要摆放的窗口编号: ", terminator: "")
-    guard let s = readLine(), let n = Int(s), (1...wins.count).contains(n) else { print("无效输入"); exit(1) }
-    let t = wins[n - 1]
-    print("模式 [1]镜像悬浮(当前桌面) [2]镜像悬浮(所有桌面) [3]并排布局 (默认1): ", terminator: "")
-    let mode = readLine()?.trimmingCharacters(in: .whitespaces) ?? ""
-    if mode != "3" { floatCmd(t, allSpaces: mode == "2") }
-    print("位置 [1]靠右 [2]靠左 [3]靠上 [4]靠下 (默认1): ", terminator: "")
-    let side: Side = ["2": .left, "3": .top, "4": .bottom][readLine()?.trimmingCharacters(in: .whitespaces) ?? ""] ?? .right
-    print("大小（如 35% 或 600，默认 35%）: ", terminator: "")
-    var amount = readLine()?.trimmingCharacters(in: .whitespaces) ?? ""
-    if amount.isEmpty { amount = "35%" }
-    print("同时把哪些窗口放进剩余区域？输入编号，逗号分隔，回车跳过（会改变它们的大小）: ", terminator: "")
-    let fit = (readLine() ?? "").split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        .filter { (1...wins.count).contains($0) && wins[$0 - 1].id != t.id }.map { wins[$0 - 1] }
-    dock(target: t, side: side, amount: amount, frame: nil, fit: fit)
-}
-
-// MARK: - main
-let args = Array(CommandLine.arguments.dropFirst())
-func opt(_ name: String) -> String? { args.firstIndex(of: name).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
-
-switch args.first {
-case nil: interactive()
-case "list":
-    for w in pinnableWindows() { print(String(format: "%8d  %@ — %@", w.id, w.app, displayTitle(w))) }
-case "float":
-    guard args.count >= 2, let id = UInt32(args[1]), let t = pinnableWindows().first(where: { $0.id == id }) else {
-        print("找不到该窗口ID，请先 ./pintop list"); exit(1)
-    }
-    floatCmd(t, allSpaces: args.contains("--all"))
-case "restore": ensureAccessibility(); restore()
-case "dock":
-    let wins = pinnableWindows()
-    guard args.count >= 2, let id = UInt32(args[1]), let t = wins.first(where: { $0.id == id }) else {
-        print("找不到该窗口ID，请先 ./pintop list"); exit(1)
-    }
-    var side: Side? = nil, amount = ""
-    for s in [Side.left, .right, .top, .bottom] { if let v = opt("--\(s.rawValue)") { side = s; amount = v } }
-    let frame = opt("--frame")
-    guard side != nil || frame != nil else { usage(); exit(1) }
-    let fit = (opt("--fit") ?? "").split(separator: ",").compactMap { UInt32($0) }
-        .compactMap { i in wins.first { $0.id == i && $0.id != t.id } }
-    dock(target: t, side: side, amount: amount, frame: frame, fit: fit)
-default: usage()
+func hasAccessibility(prompt: Bool) -> Bool {
+    AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary)
 }
