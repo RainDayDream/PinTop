@@ -152,6 +152,57 @@ func restore() -> String {
     return "已恢复 \(ok)/\(items.count) 个窗口（已关闭的窗口会被跳过）"
 }
 
+// MARK: - 桌面（Space）
+// 通过系统私有的只读接口读取桌面列表；只读取，不会移动或修改任何窗口/桌面。
+@_silgen_name("CGSMainConnectionID") func CGSMainConnectionID() -> Int32
+@_silgen_name("CGSCopyManagedDisplaySpaces") func CGSCopyManagedDisplaySpaces(_ cid: Int32) -> Unmanaged<CFArray>?
+
+struct SpaceInfo {
+    let id: UInt64
+    let label: String       // 如 “桌面 2”、“全屏：Safari”
+    let isCurrent: Bool
+}
+
+/// 悬浮范围：当前桌面 / 所有桌面 / 某个具体桌面
+struct FloatScope {
+    var allSpaces = false
+    var spaceID: UInt64? = nil
+    var label = "当前桌面"
+    static let current = FloatScope()
+    static let all = FloatScope(allSpaces: true, spaceID: nil, label: "所有桌面")
+}
+
+private func displaySpaces() -> [[String: Any]] {
+    (CGSCopyManagedDisplaySpaces(CGSMainConnectionID())?.takeRetainedValue() as? [[String: Any]]) ?? []
+}
+
+/// 每个显示器当前正在显示的桌面ID
+func currentSpaceIDs() -> Set<UInt64> {
+    Set(displaySpaces().compactMap { ($0["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? UInt64 })
+}
+
+/// 按 Mission Control 顺序列出所有桌面（含其他 App 的全屏桌面）
+func listSpaces() -> [SpaceInfo] {
+    let displays = displaySpaces()
+    let current = currentSpaceIDs()
+    var out: [SpaceInfo] = []
+    for (di, d) in displays.enumerated() {
+        let prefix = displays.count > 1 ? "显示器 \(di + 1) · " : ""
+        var n = 0
+        for s in (d["Spaces"] as? [[String: Any]] ?? []) {
+            guard let id = s["ManagedSpaceID"] as? UInt64 else { continue }
+            let type = s["type"] as? Int ?? 0
+            let label: String
+            if type == 4 {   // 其他 App 的全屏桌面
+                let name = (s["pid"] as? Int32).flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } ?? "App"
+                label = "\(prefix)全屏：\(name)"
+            } else { n += 1; label = "\(prefix)桌面 \(n)" }
+            out.append(SpaceInfo(id: id, label: label, isCurrent: current.contains(id)))
+        }
+    }
+    return out
+}
+
 // MARK: - 镜像悬浮窗
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -204,6 +255,8 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     static var pinned = Set<CGWindowID>()
     let target: Win
     let allSpaces: Bool
+    let spaceID: UInt64?                // 指定桌面模式：镜像只出现在这个桌面
+    var crossSpace: Bool { allSpaces || spaceID != nil }
     let panel: Panel
     let badge: Panel
     let badgeView = BadgeView(frame: NSRect(x: 0, y: 0, width: 82, height: 22))
@@ -224,12 +277,12 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     var observer: NSObjectProtocol?
     var stopped = false
 
-    init(target: Win, allSpaces: Bool) {
-        self.target = target; self.allSpaces = allSpaces
+    init(target: Win, allSpaces: Bool, spaceID: UInt64? = nil) {
+        self.target = target; self.allSpaces = allSpaces; self.spaceID = spaceID
         panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         badge = Panel(contentRect: NSRect(x: 0, y: 0, width: 82, height: 22), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
-        panel.level = allSpaces ? .statusBar : .floating   // 全屏桌面里需要更高层级
+        panel.level = (allSpaces || spaceID != nil) ? .statusBar : .floating   // 全屏桌面里需要更高层级
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.hidesOnDeactivate = false; panel.isReleasedWhenClosed = false
         panel.collectionBehavior = allSpaces ? [.canJoinAllSpaces, .fullScreenAuxiliary] : [.fullScreenAuxiliary]
@@ -248,9 +301,11 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.allSpaces, !self.stopped else { return }
-            self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            self.badge.collectionBehavior = self.panel.collectionBehavior
+            guard let self = self, !self.stopped else { return }
+            if self.allSpaces {
+                self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                self.badge.collectionBehavior = self.panel.collectionBehavior
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.tick() }
         }
     }
@@ -335,7 +390,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         var show: Bool
         // 全屏桌面检测：别的 App 的窗口恰好铺满整块屏幕（含菜单栏区域）
         let primH = primaryH
-        fullscreenSpace = allSpaces && wins.contains { w in
+        fullscreenSpace = crossSpace && wins.contains { w in
             w.pid != target.pid && NSScreen.screens.contains { sc in
                 abs(w.bounds.width - sc.frame.width) < 2 && abs(w.bounds.height - sc.frame.height) < 2
                 && abs(w.bounds.minX - sc.frame.minX) < 2 && abs(w.bounds.minY - (primH - sc.frame.maxY)) < 2
@@ -345,7 +400,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
             realOnScreen = true; bounds = wins[i].bounds
             show = wins[..<i].contains { !Mirror.pinned.contains($0.id) && $0.bounds.width > 40 && $0.bounds.height > 40 && $0.bounds.intersects(bounds) }
         } else {
-            realOnScreen = false; show = allSpaces       // 在其他桌面/已最小化
+            realOnScreen = false; show = crossSpace       // 在其他桌面/已最小化
         }
         if fullscreenSpace { show = true }
         if pressed { show = true }                      // 拖动期间不能隐藏，否则会丢失鼠标抬起事件
@@ -361,6 +416,12 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
             lastFrame = bounds
             panel.setFrame(nsFrame(bounds), display: true)
             if sizeChanged, let s = stream { configure(bounds.size); Task { try? await s.updateConfiguration(config) } }
+        }
+        // 指定桌面模式：只在目标桌面显示。不在目标桌面时绝不 orderFront（否则面板会落到当前桌面）
+        if let target = spaceID, !currentSpaceIDs().contains(target) {
+            if panel.isVisible && panel.isOnActiveSpace { panel.orderOut(nil) }
+            if badge.isVisible && badge.isOnActiveSpace { badge.orderOut(nil) }
+            return
         }
         // 取消浮标：窗口在屏幕上（真窗口或镜像可见）时显示在其右上角，随窗口移动
         if realOnScreen || show, lastFrame.width > 0 {

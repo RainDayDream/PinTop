@@ -10,7 +10,7 @@ func ensureAccessibility() {
     }
 }
 
-func floatCmd(_ t: Win, allSpaces: Bool) -> Never {
+func floatCmd(_ t: Win, scope: FloatScope) -> Never {
     ensureAccessibility()
     if !CGPreflightScreenCaptureAccess() {
         _ = CGRequestScreenCaptureAccess()
@@ -19,12 +19,12 @@ func floatCmd(_ t: Win, allSpaces: Bool) -> Never {
     }
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)                  // 无 Dock 图标
-    let m = Mirror(target: t, allSpaces: allSpaces)
+    let m = Mirror(target: t, allSpaces: scope.allSpaces, spaceID: scope.spaceID)
     m.onStop = { reason in print(reason); exit(reason.hasPrefix("目标窗口已关闭") || reason.hasPrefix("已取消") ? 0 : 1) }
     m.begin()
     signal(SIGINT) { _ in print("\n已取消悬浮。"); exit(0) }
     signal(SIGTERM) { _ in exit(0) }
-    print("悬浮中：\(t.app) — \(displayTitle(t))  模式：\(allSpaces ? "所有桌面" : "当前桌面")。按 Ctrl+C 退出。")
+    print("悬浮中：\(t.app) — \(displayTitle(t))  模式：\(scope.label)。按 Ctrl+C 退出。")
     app.run()
     exit(0)
 }
@@ -44,6 +44,8 @@ func usage() {
       pintop                                   交互式
       pintop list                              列出窗口ID
       pintop float <ID> [--all]                镜像悬浮：被盖住时在最上层显示实时画面（--all=所有桌面）
+      pintop spaces                            列出所有桌面（含全屏桌面）
+      pintop float <ID> --space N              镜像悬浮，只出现在第 N 个桌面（序号见 spaces）
       pintop dock <ID> --right 35%             靠右，占 35% 宽（还可用 --left/--top/--bottom，也可写像素如 600）
       pintop dock <ID> --frame x,y,w,h         任意区域（像素或百分比，相对可用屏幕区域）
       pintop dock <ID> --right 35% --fit <ID2>[,<ID3>]   同时把其他窗口放进剩余区域（会改变它们的大小）
@@ -59,9 +61,16 @@ func interactive() {
     print("要摆放的窗口编号: ", terminator: "")
     guard let s = readLine(), let n = Int(s), (1...wins.count).contains(n) else { print("无效输入"); exit(1) }
     let t = wins[n - 1]
-    print("模式 [1]镜像悬浮(当前桌面) [2]镜像悬浮(所有桌面) [3]并排布局 (默认1): ", terminator: "")
+    print("模式 [1]镜像悬浮(当前桌面) [2]镜像悬浮(所有桌面) [3]镜像悬浮(指定桌面) [4]并排布局 (默认1): ", terminator: "")
     let mode = readLine()?.trimmingCharacters(in: .whitespaces) ?? ""
-    if mode != "3" { floatCmd(t, allSpaces: mode == "2") }
+    if mode == "3" {
+        let spaces = listSpaces()
+        for (i, s) in spaces.enumerated() { print("  [\(i + 1)] \(s.label)\(s.isCurrent ? "  ← 当前" : "")") }
+        print("桌面编号: ", terminator: "")
+        guard let s = readLine(), let n = Int(s), (1...max(spaces.count, 1)).contains(n), !spaces.isEmpty else { print("无效输入"); exit(1) }
+        floatCmd(t, scope: FloatScope(allSpaces: false, spaceID: spaces[n - 1].id, label: spaces[n - 1].label))
+    }
+    if mode != "4" { floatCmd(t, scope: mode == "2" ? .all : .current) }
     print("位置 [1]靠右 [2]靠左 [3]靠上 [4]靠下 (默认1): ", terminator: "")
     let side: Side = ["2": .left, "3": .top, "4": .bottom][readLine()?.trimmingCharacters(in: .whitespaces) ?? ""] ?? .right
     print("大小（如 35% 或 600，默认 35%）: ", terminator: "")
@@ -85,7 +94,17 @@ case "float":
     guard args.count >= 2, let id = UInt32(args[1]), let t = pinnableWindows().first(where: { $0.id == id }) else {
         print("找不到该窗口ID，请先 ./pintop list"); exit(1)
     }
-    floatCmd(t, allSpaces: args.contains("--all"))
+    var scope = args.contains("--all") ? FloatScope.all : FloatScope.current
+    if let v = opt("--space") {
+        let spaces = listSpaces()
+        guard let n = Int(v), (1...max(spaces.count, 1)).contains(n), !spaces.isEmpty else {
+            print("桌面序号无效，请先 ./pintop spaces 查看"); exit(1)
+        }
+        scope = FloatScope(allSpaces: false, spaceID: spaces[n - 1].id, label: spaces[n - 1].label)
+    }
+    floatCmd(t, scope: scope)
+case "spaces":
+    for (i, s) in listSpaces().enumerated() { print("[\(i + 1)] \(s.label)\(s.isCurrent ? "  ← 当前" : "")") }
 case "restore": ensureAccessibility(); print(restore())
 case "dock":
     let wins = pinnableWindows()

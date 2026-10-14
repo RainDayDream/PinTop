@@ -22,7 +22,7 @@ struct PinTopApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var pins: [CGWindowID: Mirror] = [:]
-    var pinInfo: [CGWindowID: (app: String, title: String, all: Bool)] = [:]
+    var pinInfo: [CGWindowID: (app: String, title: String, scope: String)] = [:]
     // 主窗口控件
     var mainWin: NSWindow?
     var axLabel = NSTextField(), scLabel = NSTextField()
@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let pinsStack = NSStackView()   // 正在悬浮：每个窗口一行
     var mainStack = NSStackView()
     var listedWins: [Win] = []
+    var spaceChoices: [FloatScope] = []   // 范围下拉框的各项（当前桌面 / 所有桌面 / 每个具体桌面）
     var allowMulti = false          // 是否允许同时悬浮多个窗口
     var multiBox = NSButton()
     var multiHolder: ClosureButton?   // 持有复选框动作的目标（NSButton.target 为弱引用）
@@ -73,11 +74,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let floatCur = NSMenuItem(title: "镜像悬浮（当前桌面）", action: nil, keyEquivalent: "")
         let floatAll = NSMenuItem(title: "镜像悬浮（所有桌面）", action: nil, keyEquivalent: "")
+        let floatSpace = NSMenuItem(title: "镜像悬浮（指定桌面）", action: nil, keyEquivalent: "")
+        let subSpace = NSMenu()
+        for sp in listSpaces() {
+            let winMenu = NSMenu()
+            for w in wins {
+                winMenu.addItem(item(label(w)) { [weak self] in
+                    self?.startFloat(w, scope: FloatScope(allSpaces: false, spaceID: sp.id, label: sp.label))
+                })
+            }
+            if wins.isEmpty { winMenu.addItem(item("（没有可操作的窗口）", enabled: false)) }
+            let si = NSMenuItem(title: sp.label + (sp.isCurrent ? "（当前）" : ""), action: nil, keyEquivalent: "")
+            si.submenu = winMenu
+            subSpace.addItem(si)
+        }
+        floatSpace.submenu = subSpace
         let dockItem = NSMenuItem(title: "并排布局", action: nil, keyEquivalent: "")
         let subCur = NSMenu(), subAll = NSMenu(), subDock = NSMenu()
         for w in wins {
-            subCur.addItem(item(label(w)) { [weak self] in self?.startFloat(w, all: false) })
-            subAll.addItem(item(label(w)) { [weak self] in self?.startFloat(w, all: true) })
+            subCur.addItem(item(label(w)) { [weak self] in self?.startFloat(w, scope: .current) })
+            subAll.addItem(item(label(w)) { [weak self] in self?.startFloat(w, scope: .all) })
             let presets = NSMenu()
             for (name, side, amt) in [("靠右 35%", Side.right, "35%"), ("靠右 50%", .right, "50%"),
                                       ("靠左 35%", .left, "35%"), ("靠左 50%", .left, "50%"),
@@ -92,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if wins.isEmpty { sub.addItem(item("（没有可操作的窗口）", enabled: false)) }
             it.submenu = sub
             menu.addItem(it)
+            if it === floatAll { menu.addItem(floatSpace) }
         }
 
         if !pins.isEmpty {
@@ -99,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item("正在悬浮", enabled: false))
             for (id, _) in pins.sorted(by: { $0.key < $1.key }) {
                 let info = pinInfo[id]
-                let name = "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.all == true ? "所有桌面" : "当前桌面")）"
+                let name = "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）"
                 menu.addItem(item("取消：\(name)") { [weak self] in self?.stopPin(id) })
             }
             menu.addItem(item("取消全部悬浮") { [weak self] in
@@ -150,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    func startFloat(_ w: Win, all: Bool) {
+    func startFloat(_ w: Win, scope: FloatScope) {
         guard checkAccessibility() else { return }
         if !CGPreflightScreenCaptureAccess() {
             _ = CGRequestScreenCaptureAccess()
@@ -158,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if allowMulti { stopPin(w.id) } else { for id in Array(pins.keys) { stopPin(id) } }   // 默认一次只悬浮一个
-        let m = Mirror(target: w, allSpaces: all)
+        let m = Mirror(target: w, allSpaces: scope.allSpaces, spaceID: scope.spaceID)
         m.onStop = { [weak self] reason in
             DispatchQueue.main.async {
                 self?.pins[w.id] = nil; self?.pinInfo[w.id] = nil; self?.refreshMain()
@@ -166,7 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         pins[w.id] = m
-        pinInfo[w.id] = (w.app, displayTitle(w), all)
+        pinInfo[w.id] = (w.app, displayTitle(w), scope.label)
         m.begin()
     }
 
@@ -229,10 +246,11 @@ extension AppDelegate {
 
         // 镜像悬浮
         spacePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        spacePopup.addItems(withTitles: ["当前桌面", "所有桌面（含全屏桌面）"])
+        // 选项在 refreshMain 里按当前的桌面列表动态生成
         let floatBtn = ClosureButton("开始镜像悬浮") { [weak self] in
             guard let self = self, let win = self.selectedWindow() else { return }
-            self.startFloat(win, all: self.spacePopup.indexOfSelectedItem == 1)
+            let i = self.spacePopup.selectedItem?.representedObject as? Int ?? 0
+            self.startFloat(win, scope: i < self.spaceChoices.count ? self.spaceChoices[i] : .current)
             self.refreshMain()
         }
 
@@ -325,6 +343,21 @@ extension AppDelegate {
         if let k = keep, let idx = listedWins.firstIndex(where: { $0.id == k }) { winPopup.selectItem(at: idx) }
         if listedWins.isEmpty { winPopup.addItem(withTitle: "（没有可操作的窗口）") }
 
+        // 悬浮范围：当前桌面 / 所有桌面 / 识别到的每个桌面（桌面可能增减，所以每次刷新都重建）
+        let keepLabel = spaceChoices.indices.contains(spacePopup.indexOfSelectedItem) ? spaceChoices[spacePopup.indexOfSelectedItem].label : nil
+        spaceChoices = [.current, .all] + listSpaces().map {
+            FloatScope(allSpaces: false, spaceID: $0.id, label: $0.label)
+        }
+        spacePopup.removeAllItems()
+        for (i, sc) in spaceChoices.enumerated() {
+            let sp = spaceChoices[i].spaceID.flatMap { id in listSpaces().first { $0.id == id } }
+            let title = i == 0 ? "当前桌面" : i == 1 ? "所有桌面（含全屏桌面）" : "指定：\(sc.label)\(sp?.isCurrent == true ? "（当前）" : "")"
+            let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            it.representedObject = i
+            spacePopup.menu?.addItem(it)
+        }
+        if let k = keepLabel, let idx = spaceChoices.firstIndex(where: { $0.label == k }) { spacePopup.selectItem(at: idx) }
+
         // 正在悬浮：逐行列出，每行一个取消按钮
         pinsStack.arrangedSubviews.forEach { pinsStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         if pins.isEmpty {
@@ -333,7 +366,7 @@ extension AppDelegate {
         }
         for (id, _) in pins.sorted(by: { $0.key < $1.key }) {
             let info = pinInfo[id]
-            let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.all == true ? "所有桌面" : "当前桌面")）")
+            let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）")
             name.lineBreakMode = .byTruncatingTail
             name.widthAnchor.constraint(equalToConstant: 340).isActive = true
             let cancel = ClosureButton("取消") { [weak self] in self?.stopPin(id); self?.refreshMain() }
