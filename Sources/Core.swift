@@ -203,6 +203,13 @@ func listSpaces() -> [SpaceInfo] {
     return out
 }
 
+// MARK: - 拖动排序
+/// 把第 `from` 行拖到“第 `insertionRow` 行之前”（insertionRow 取 0...行数，行数表示拖到最后）后，
+/// 该项在移除自身之后的数组里应处于的下标。
+func dragDestinationIndex(from: Int, insertionRow: Int) -> Int {
+    insertionRow > from ? insertionRow - 1 : insertionRow
+}
+
 // MARK: - PinTop 自己的窗口与镜像的层级关系
 /// 鼠标是否停在 PinTop 窗口上、并且那个位置被某个可见镜像盖着。
 /// 满足时才需要把 PinTop 窗口抬到镜像之上（否则点到的是镜像、够不到 PinTop 的按钮）；

@@ -28,7 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var axLabel = NSTextField(), scLabel = NSTextField()
     var winPopup = NSPopUpButton(), spacePopup = NSPopUpButton(), sidePopup = NSPopUpButton()
     var sizeField = NSTextField()
-    let pinsStack = NSStackView()   // 正在悬浮：每个窗口一行
+    let pinsStack = NSStackView()   // 正在悬浮区域：「（无）」文字 或 可拖动排序的表格
+    let pinTable = NSTableView()    // 每个悬浮窗口一行，支持拖动排序
+    let pinScroll = NSScrollView()
+    var pinTableHeight: NSLayoutConstraint!
+    let noneLabel = NSTextField(labelWithString: "（无）")
+    let pinDragType = NSPasteboard.PasteboardType("com.raindaydream.pintop.pinrow")
     var mainStack = NSStackView()
     var lastFitHeight: CGFloat = 0     // 上一次按内容计算出的高度，用来判断用户有没有手动调过窗口高度
     var listedWins: [Win] = []
@@ -341,6 +346,29 @@ extension AppDelegate {
 
         // 正在悬浮：每个窗口一行（见 refreshMain）
         pinsStack.orientation = .vertical; pinsStack.alignment = .leading; pinsStack.spacing = 4
+        // 可拖动排序的列表：左侧「☰」手柄，上下拖动整行即可调整悬浮顺序
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("pin")); col.resizingMask = .autoresizingMask
+        pinTable.addTableColumn(col)
+        pinTable.headerView = nil
+        pinTable.rowHeight = 30; pinTable.intercellSpacing = NSSize(width: 0, height: 4)
+        pinTable.backgroundColor = .clear; pinTable.style = .plain
+        pinTable.selectionHighlightStyle = .none
+        pinTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        pinTable.dataSource = self; pinTable.delegate = self
+        pinTable.registerForDraggedTypes([pinDragType])
+        pinTable.setDraggingSourceOperationMask(.move, forLocal: true)
+        pinTable.draggingDestinationFeedbackStyle = .gap          // 拖动时在目标位置腾出空隙
+        pinScroll.documentView = pinTable
+        pinScroll.hasVerticalScroller = false; pinScroll.drawsBackground = false
+        pinScroll.borderType = .noBorder; pinScroll.verticalScrollElasticity = .none
+        pinScroll.translatesAutoresizingMaskIntoConstraints = false
+        pinTableHeight = pinScroll.heightAnchor.constraint(equalToConstant: 0)
+        pinTableHeight.isActive = true
+        noneLabel.textColor = .secondaryLabelColor; noneLabel.alignment = .left
+        pinsStack.addArrangedSubview(noneLabel)
+        pinsStack.addArrangedSubview(pinScroll)
+        pinScroll.leadingAnchor.constraint(equalTo: pinsStack.leadingAnchor).isActive = true
+        pinScroll.trailingAnchor.constraint(equalTo: pinsStack.trailingAnchor).isActive = true
         let stopAll = ClosureButton("全部取消") { [weak self] in
             guard let self = self else { return }
             for id in Array(self.pins.keys) { self.stopPin(id) }
@@ -360,7 +388,7 @@ extension AppDelegate {
             header("权限"), row([axLabel, axBtn]), row([scLabel, scBtn]),                         // 0-2
             header("1. 选择窗口"), row([winPopup, refresh]),                                       // 3-4
             header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),              // 5-6
-            header("正在悬浮（从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),   // 7-9
+            header("正在悬浮（拖动 ☰ 调整顺序，从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),   // 7-9
             separator,                                                                             // 10
             header("并排布局（不是悬浮：把上面选中的窗口摆到屏幕一侧）"),                            // 11
             row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),                        // 12
@@ -448,31 +476,12 @@ extension AppDelegate {
         }
         if let k = keepLabel, let idx = spaceChoices.firstIndex(where: { $0.label == k }) { spacePopup.selectItem(at: idx) }
 
-        // 正在悬浮：逐行列出，每行一个取消按钮
-        pinsStack.arrangedSubviews.forEach { pinsStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        if pins.isEmpty {
-            let none = NSTextField(labelWithString: "（无）"); none.textColor = .secondaryLabelColor
-            pinsStack.addArrangedSubview(none)
-        }
-        for (rank, id) in pinOrder.enumerated() {
-            let info = pinInfo[id]
-            let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）")
-            name.lineBreakMode = .byTruncatingTail
-            // 层级：第 1 层 = 最顶；选择后该窗口移到对应层，其余顺次让位
-            let n = pinOrder.count
-            let items = (0..<n).map { k in "第 \(k + 1) 层" + (n > 1 && k == 0 ? "（最顶）" : n > 1 && k == n - 1 ? "（最底）" : "") }
-            let order = ClosurePopup(items: items, selected: rank) { [weak self] k in
-                // 延后一拍：不能在下拉框自己的动作回调里把它销毁重建（菜单追踪还没结束）
-                DispatchQueue.main.async { self?.movePin(id, to: k) }
-            }
-            order.isEnabled = n > 1
-            let cancel = ClosureButton("取消") { [weak self] in self?.stopPin(id); self?.refreshMain() }
-            let r = row([name, order, cancel])
-            pinsStack.addArrangedSubview(r)
-            r.leadingAnchor.constraint(equalTo: pinsStack.leadingAnchor).isActive = true
-            r.trailingAnchor.constraint(equalTo: pinsStack.trailingAnchor).isActive = true
-        }
-        leftAlignLabels(pinsStack)
+        // 正在悬浮：表格逐行显示（可拖动排序）；没有悬浮窗口时显示「（无）」
+        let n = pinOrder.count
+        noneLabel.isHidden = n > 0
+        pinScroll.isHidden = n == 0
+        pinTable.reloadData()
+        pinTableHeight.constant = CGFloat(n) * (pinTable.rowHeight + pinTable.intercellSpacing.height)
         // 窗口高度：用户没手动调过高度时随内容增减；调过则只保证不小于内容所需的最小高度
         if let w = mainWin {
             mainStack.layoutSubtreeIfNeeded()
@@ -489,4 +498,60 @@ extension AppDelegate {
             }
         }
     }
+}
+
+// MARK: - 「正在悬浮」列表：数据源与拖动排序
+extension AppDelegate: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int { pinOrder.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row rank: Int) -> NSView? {
+        guard rank < pinOrder.count else { return nil }
+        let id = pinOrder[rank]
+        let info = pinInfo[id]
+        let handle = NSTextField(labelWithString: "☰")
+        handle.textColor = .tertiaryLabelColor
+        handle.toolTip = pinOrder.count > 1 ? "按住上下拖动，调整悬浮顺序" : nil
+        let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）")
+        name.lineBreakMode = .byTruncatingTail
+        name.alignment = .left
+        // 层级下拉框：与拖动排序等价，第 1 层 = 最顶
+        let n = pinOrder.count
+        let items = (0..<n).map { k in "第 \(k + 1) 层" + (n > 1 && k == 0 ? "（最顶）" : n > 1 && k == n - 1 ? "（最底）" : "") }
+        let order = ClosurePopup(items: items, selected: rank) { [weak self] k in
+            // 延后一拍：不能在下拉框自己的动作回调里把它销毁重建（菜单追踪还没结束）
+            DispatchQueue.main.async { self?.movePin(id, to: k) }
+        }
+        order.isEnabled = n > 1
+        let cancel = ClosureButton("取消") { [weak self] in
+            DispatchQueue.main.async { self?.stopPin(id); self?.refreshMain() }
+        }
+        return row([handle, name, order, cancel], stretch: 1)
+    }
+
+    // 开始拖动：把窗口ID放进剪贴板。只有一行时没有顺序可调，不允许拖动。
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard pinOrder.count > 1, row < pinOrder.count else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(String(pinOrder[row]), forType: pinDragType)
+        return item
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        guard (info.draggingSource as? NSTableView) === pinTable else { return [] }
+        if dropOperation == .on { tableView.setDropRow(row, dropOperation: .above) }     // 只允许“插到某行之前”
+        return .move
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
+                   dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let s = info.draggingPasteboard.string(forType: pinDragType), let id = UInt32(s),
+              let from = pinOrder.firstIndex(of: id) else { return false }
+        let to = dragDestinationIndex(from: from, insertionRow: row)
+        // 延后一拍：拖放回调里不能立刻重建正在被拖动的表格
+        DispatchQueue.main.async { [weak self] in self?.movePin(id, to: to) }
+        return true
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
 }
