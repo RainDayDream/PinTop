@@ -203,6 +203,14 @@ func listSpaces() -> [SpaceInfo] {
     return out
 }
 
+// MARK: - PinTop 自己的窗口与镜像的层级关系
+/// 鼠标是否停在 PinTop 窗口上、并且那个位置被某个可见镜像盖着。
+/// 满足时才需要把 PinTop 窗口抬到镜像之上（否则点到的是镜像、够不到 PinTop 的按钮）；
+/// 其他时候保持普通层级，这样调整悬浮顺序的效果不会被 PinTop 自己的窗口挡住。
+func shouldRaiseMainWindow(pointer: NSPoint, mainFrame: NSRect, visibleMirrorFrames: [NSRect]) -> Bool {
+    mainFrame.contains(pointer) && visibleMirrorFrames.contains { $0.contains(pointer) }
+}
+
 // MARK: - 镜像悬浮窗
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -251,8 +259,26 @@ final class BadgeView: NSView {
 
 /// 目标窗口被盖住时，在最上层显示它的实时画面；点击时激活真窗口并转发鼠标操作。
 final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
-    /// 当前所有正在悬浮的窗口ID：多个悬浮窗口之间互不视为“盖住”对方，避免互相抢占
+    /// 当前所有正在悬浮的窗口ID
     static var pinned = Set<CGWindowID>()
+    /// 悬浮优先级：数值越小越靠上（0 = 最顶层）。用于判断悬浮窗口之间谁该盖住谁。
+    static var ranks: [CGWindowID: Int] = [:]
+
+    /// 目标窗口是否被“应该盖在它上面”的窗口挡住。`wins` 为从前到后排列的屏幕上窗口。
+    /// 优先级更高的悬浮窗口盖在它上面是正确的，不算被挡；
+    /// 优先级更低的悬浮窗口、以及所有非悬浮窗口盖在它上面都算被挡（此时需要显示镜像把它顶上来）。
+    static func isCovered(_ id: CGWindowID, bounds: CGRect, in wins: [Win]) -> Bool {
+        guard let i = wins.firstIndex(where: { $0.id == id }) else { return false }
+        let myRank = ranks[id]
+        return wins[..<i].contains { w in
+            guard w.bounds.width > 40, w.bounds.height > 40, w.bounds.intersects(bounds) else { return false }
+            if pinned.contains(w.id) {
+                guard let mine = myRank, let theirs = ranks[w.id] else { return false }
+                return theirs > mine          // 对方优先级更低却盖在我上面 → 我被挡
+            }
+            return true
+        }
+    }
     let target: Win
     let allSpaces: Bool
     let spaceID: UInt64?                // 指定桌面模式：镜像只出现在这个桌面
@@ -316,7 +342,9 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         Task { @MainActor in
             do { try await self.start() } catch { self.finish("启动失败：\(error.localizedDescription)") }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)     // common 模式：菜单追踪/模态框期间也继续运行
+        timer = t
     }
 
     /// 停止悬浮并释放资源（不触发 onStop）
@@ -335,6 +363,15 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     func finish(_ reason: String) {
         guard !stopped else { return }
         stop(); onStop?(reason)
+    }
+
+    /// 堆叠顺序：rankFromTop 0 = 最顶层。每个悬浮窗口占两个窗口层级（镜像面板 + 其上一级的取消浮标），
+    /// 层与层之间不交错，所以排在上面的镜像一定盖住下面的，与点击先后无关。
+    func setStacking(rankFromTop: Int, of total: Int) {
+        let base = NSWindow.Level.statusBar.rawValue
+        let level = base + 2 * max(0, total - 1 - rankFromTop)
+        panel.level = NSWindow.Level(rawValue: level)
+        badge.level = NSWindow.Level(rawValue: level + 1)
     }
 
     func configure(_ size: CGSize) {
@@ -398,10 +435,11 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let i = wins.firstIndex(where: { $0.id == target.id }) {
             realOnScreen = true; bounds = wins[i].bounds
-            show = wins[..<i].contains { !Mirror.pinned.contains($0.id) && $0.bounds.width > 40 && $0.bounds.height > 40 && $0.bounds.intersects(bounds) }
+            show = Mirror.isCovered(target.id, bounds: bounds, in: wins)
         } else {
             realOnScreen = false; show = crossSpace       // 在其他桌面/已最小化
         }
+        if pressed && NSEvent.pressedMouseButtons == 0 { pressed = false }   // 鼠标抬起事件丢失时自愈，避免镜像一直固定显示
         if fullscreenSpace { show = true }
         if pressed { show = true }                      // 拖动期间不能隐藏，否则会丢失鼠标抬起事件
         // 只采纳“稳定且在屏幕内”的位置：切换桌面时真窗口会随动画滑出屏幕，不能记成新位置
@@ -454,7 +492,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         let pt = CGPoint(x: loc.x, y: primaryH - loc.y)
         let n = Int64(e.clickCount)
         let isDown = (t == .leftMouseDown || t == .rightMouseDown)
-        if isDown { pressed = true; activateTarget(); panel.orderFrontRegardless() }   // 最近点击的镜像排在其他镜像之上
+        if isDown { pressed = true; activateTarget() }
         if t == .leftMouseUp || t == .rightMouseUp { pressed = false }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in     // 等激活生效；统一延迟保证事件顺序
             if isDown, let ax = axWindow(target) { AXUIElementPerformAction(ax, kAXRaiseAction as CFString) }

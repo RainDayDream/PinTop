@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastFitHeight: CGFloat = 0     // 上一次按内容计算出的高度，用来判断用户有没有手动调过窗口高度
     var listedWins: [Win] = []
     var spaceChoices: [FloatScope] = []   // 范围下拉框的各项（当前桌面 / 所有桌面 / 每个具体桌面）
+    var forceRaiseUntil = Date.distantPast     // 在此时间之前，主窗口强制保持在镜像之上
+    var pinOrder: [CGWindowID] = []     // 悬浮堆叠顺序，下标 0 = 最顶层
     var allowMulti = false          // 是否允许同时悬浮多个窗口
     var multiBox = NSButton()
     var multiHolder: ClosureButton?   // 持有复选框动作的目标（NSButton.target 为弱引用）
@@ -116,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !pins.isEmpty {
             menu.addItem(.separator())
             menu.addItem(item("正在悬浮", enabled: false))
-            for (id, _) in pins.sorted(by: { $0.key < $1.key }) {
+            for id in pinOrder {
                 let info = pinInfo[id]
                 let name = "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）"
                 menu.addItem(item("取消：\(name)") { [weak self] in self?.stopPin(id) })
@@ -180,18 +182,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let m = Mirror(target: w, allSpaces: scope.allSpaces, spaceID: scope.spaceID)
         m.onStop = { [weak self] reason in
             DispatchQueue.main.async {
-                self?.pins[w.id] = nil; self?.pinInfo[w.id] = nil; self?.refreshMain()
+                self?.forgetPin(w.id); self?.refreshMain()
                 if !reason.hasPrefix("目标窗口已关闭") && !reason.hasPrefix("已取消") { self?.notify("悬浮已停止", reason) }
             }
         }
         pins[w.id] = m
         pinInfo[w.id] = (w.app, displayTitle(w), scope.label)
+        pinOrder.removeAll { $0 == w.id }
+        pinOrder.insert(w.id, at: 0)          // 新悬浮的默认放在最顶层
+        applyPinOrder()
         m.begin()
+    }
+
+    /// 把每个悬浮窗口的堆叠层级按 pinOrder 设置（下标 0 = 最顶层）
+    func applyPinOrder() {
+        Mirror.ranks = Dictionary(uniqueKeysWithValues: pinOrder.enumerated().map { ($0.element, $0.offset) })
+        for (i, id) in pinOrder.enumerated() { pins[id]?.setStacking(rankFromTop: i, of: pinOrder.count) }
+        updateMainWindowLevel()
+    }
+
+    /// 主窗口的层级：只有鼠标停在它上面、且该位置被镜像盖着时，才抬到镜像之上（保证按钮点得到）；
+    /// 否则保持普通层级，让调整悬浮顺序的效果立刻可见，不被 PinTop 自己的窗口挡住。
+    func updateMainWindowLevel() {
+        guard let w = mainWin, w.isVisible else { return }
+        let mirrors = pins.values.filter { $0.panel.isVisible }.map { $0.panel.frame }
+        let hover = shouldRaiseMainWindow(pointer: NSEvent.mouseLocation, mainFrame: w.frame, visibleMirrorFrames: mirrors)
+        let forced = Date() < forceRaiseUntil      // 从 Dock/菜单栏唤起窗口后，先短暂抬高让它可见
+        let want: NSWindow.Level = (hover || forced)
+            ? NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2 * max(pinOrder.count, 1) + 2) : .normal
+        if w.level != want { w.level = want }
+    }
+
+    /// 把某个悬浮窗口移到第 index 层（0 起，0 = 最顶层），其余顺次让位
+    func movePin(_ id: CGWindowID, to index: Int) {
+        guard pinOrder.contains(id) else { return }
+        pinOrder.removeAll { $0 == id }
+        pinOrder.insert(id, at: min(max(index, 0), pinOrder.count))
+        applyPinOrder()
+        refreshMain()
+    }
+
+    func forgetPin(_ id: CGWindowID) {
+        pins[id] = nil; pinInfo[id] = nil
+        pinOrder.removeAll { $0 == id }
+        applyPinOrder()
     }
 
     func stopPin(_ id: CGWindowID) {
         pins[id]?.stop()
-        pins[id] = nil; pinInfo[id] = nil
+        forgetPin(id)
     }
 
     func dock(_ w: Win, _ side: Side, _ amount: String) {
@@ -212,12 +251,25 @@ final class ClosureButton: NSButton {
     @objc func fire() { fn?() }
 }
 
+final class ClosurePopup: NSPopUpButton {
+    var fn: ((Int) -> Void)?
+    convenience init(items: [String], selected: Int, _ fn: @escaping (Int) -> Void) {
+        self.init(frame: .zero, pullsDown: false)
+        for t in items { menu?.addItem(NSMenuItem(title: t, action: nil, keyEquivalent: "")) }   // 不用 addItem(withTitle:)，避免同名项被合并
+        selectItem(at: selected)
+        self.fn = fn; target = self; action = #selector(fire)
+    }
+    @objc func fire() { fn?(indexOfSelectedItem) }
+}
+
 extension AppDelegate {
     func showMain() {
         if mainWin == nil { buildMain() }
         refreshMain()
         NSApp.activate(ignoringOtherApps: true)
+        forceRaiseUntil = Date().addingTimeInterval(2)      // 唤起后 2 秒内保证窗口在镜像之上可见
         mainWin?.makeKeyAndOrderFront(nil)
+        updateMainWindowLevel()
     }
 
     func header(_ t: String) -> NSTextField {
@@ -296,7 +348,7 @@ extension AppDelegate {
             self.refreshMain()
         }
 
-        multiBox = NSButton(checkboxWithTitle: "允许同时悬浮多个窗口（最近点击的在最上层）", target: nil, action: nil)
+        multiBox = NSButton(checkboxWithTitle: "允许同时悬浮多个窗口（可在上方设置层级顺序）", target: nil, action: nil)
         multiBox.state = allowMulti ? .on : .off
         let multiAct = ClosureButton("") { }
         multiBox.target = multiAct; multiBox.action = #selector(ClosureButton.fire)
@@ -312,7 +364,7 @@ extension AppDelegate {
             header("1. 选择窗口"), row([winPopup, refresh]),
             header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),
             header("或：并排布局（把窗口摆到屏幕一侧）"), row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),
-            header("正在悬浮"), pinsStack, row([stopAll, multiBox], spacer: true),
+            header("正在悬浮（从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),
             tip,
         ])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
@@ -348,6 +400,8 @@ extension AppDelegate {
         w.center()
         w.setFrameAutosaveName("PinTopMainWindow")   // 记住上次的窗口大小和位置
         mainWin = w
+        let levelTimer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in self?.updateMainWindowLevel() }
+        RunLoop.main.add(levelTimer, forMode: .common)
         NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: w, queue: .main) { [weak self] _ in
             guard let self = self, let w = self.mainWin else { return }
             self.tipLabel?.preferredMaxLayoutWidth = max(100, w.contentLayoutRect.width - 40)
@@ -408,12 +462,20 @@ extension AppDelegate {
             let none = NSTextField(labelWithString: "（无）"); none.textColor = .secondaryLabelColor
             pinsStack.addArrangedSubview(none)
         }
-        for (id, _) in pins.sorted(by: { $0.key < $1.key }) {
+        for (rank, id) in pinOrder.enumerated() {
             let info = pinInfo[id]
             let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）")
             name.lineBreakMode = .byTruncatingTail
+            // 层级：第 1 层 = 最顶；选择后该窗口移到对应层，其余顺次让位
+            let n = pinOrder.count
+            let items = (0..<n).map { k in "第 \(k + 1) 层" + (n > 1 && k == 0 ? "（最顶）" : n > 1 && k == n - 1 ? "（最底）" : "") }
+            let order = ClosurePopup(items: items, selected: rank) { [weak self] k in
+                // 延后一拍：不能在下拉框自己的动作回调里把它销毁重建（菜单追踪还没结束）
+                DispatchQueue.main.async { self?.movePin(id, to: k) }
+            }
+            order.isEnabled = n > 1
             let cancel = ClosureButton("取消") { [weak self] in self?.stopPin(id); self?.refreshMain() }
-            let r = row([name, cancel])
+            let r = row([name, order, cancel])
             pinsStack.addArrangedSubview(r)
             r.leadingAnchor.constraint(equalTo: pinsStack.leadingAnchor).isActive = true
             r.trailingAnchor.constraint(equalTo: pinsStack.trailingAnchor).isActive = true
