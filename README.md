@@ -3,12 +3,28 @@
 让任意 App 的某个窗口始终显示在其他窗口之上（镜像悬浮），或把它摆到屏幕指定位置（并排布局）。
 带主窗口和菜单栏图标的 App，也提供命令行用法；Swift 编写，不修改任何窗口内容。
 
+## 最新版本：V0.1.0
+
+| | 链接 |
+|---|---|
+| 下载 DMG（最新版） | **[PinTop.dmg](https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg)** |
+| 本版本说明 | [Release V0.1.0](https://github.com/RainDayDream/PinTop/releases/tag/V0.1.0) |
+| 所有版本 | [Releases](https://github.com/RainDayDream/PinTop/releases) |
+
+**当前可用功能**
+- **镜像悬浮**：让某个窗口始终显示在其他窗口之上；被盖住时在最上层显示它的实时画面，点击即可继续操作。
+- **悬浮范围**：当前桌面 / 所有桌面（含其他 App 的全屏桌面）/ **指定某个具体桌面**（自动识别你现有的所有桌面）。
+- **悬浮窗口右上角「✕ 取消悬浮」浮标**，一键取消。
+- **同时悬浮多个窗口**（可选，最近点击的在最上层），「正在悬浮」列表逐行显示、可单独取消。
+- **并排布局**：把窗口摆到屏幕靠右/左/上/下的指定大小，可把其他窗口放进剩余区域，随时「恢复原位置」。
+- **主窗口 + 菜单栏图钉** 两种入口，另提供**命令行**（`pintop`）。
+
 ## 安装
 
 **一键安装（推荐）**：在「终端」里粘贴运行，自动下载最新版并安装到「应用程序」：
 
 ```bash
-curl -fL -o /tmp/PinTop.dmg https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg \
+curl -fL --retry 3 -o /tmp/PinTop.dmg https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg \
   && hdiutil attach /tmp/PinTop.dmg -nobrowse -quiet -mountpoint /tmp/PinTopVolume \
   && rm -rf /Applications/PinTop.app \
   && cp -R /tmp/PinTopVolume/PinTop.app /Applications/ ; \
