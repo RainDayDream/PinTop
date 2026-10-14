@@ -1,14 +1,22 @@
 #!/bin/zsh
-# 构建命令行工具 pintop 和菜单栏 App build/PinTop.app
+# 构建命令行工具 pintop 和菜单栏 App build.noindex/PinTop.app
 set -e
 cd "$(dirname "$0")"
+
+# 构建输出放在 build.noindex/：以 .noindex 结尾的目录会被 Spotlight 跳过，
+# 避免构建中间产物（App、DMG 临时目录）被系统登记成“又一个 PinTop”。
+OUT=build.noindex
+LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+unregister() { [ -x "$LSR" ] && "$LSR" -u "$1" >/dev/null 2>&1 || true; }   # 清除启动服务里对该路径的登记
 
 echo "==> 命令行工具 ./pintop"
 swiftc -O Sources/Core.swift Sources/CLI/main.swift -o pintop
 
-echo "==> 菜单栏 App build/PinTop.app"
-APP=build/PinTop.app
+echo "==> 菜单栏 App build.noindex/PinTop.app"
+APP=$OUT/PinTop.app
+unregister "$APP"
 rm -rf "$APP"
+mkdir -p "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library Sources/Core.swift Sources/App/App.swift -o "$APP/Contents/MacOS/PinTop"
 cat > "$APP/Contents/Info.plist" <<'EOF'
@@ -34,12 +42,13 @@ codesign --force --deep --sign - --identifier com.raindaydream.pintop \
     -r='designated => identifier "com.raindaydream.pintop"' "$APP"
 echo "完成：$APP"
 
-echo "==> 安装包 build/PinTop.dmg"
-STAGE=build/dmg
-rm -rf "$STAGE" build/PinTop.dmg
+echo "==> 安装包 build.noindex/PinTop.dmg"
+STAGE=$OUT/dmg
+rm -rf "$STAGE" $OUT/PinTop.dmg
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "PinTop" -srcfolder "$STAGE" -ov -format UDZO build/PinTop.dmg >/dev/null
+hdiutil create -volname "PinTop" -srcfolder "$STAGE" -ov -format UDZO $OUT/PinTop.dmg >/dev/null
 rm -rf "$STAGE"
-echo "完成：build/PinTop.dmg（打开后把 PinTop 拖到 Applications）"
+unregister "$STAGE/PinTop.app"      # 打包用的临时副本不应留在登记表里
+echo "完成：build.noindex/PinTop.dmg（打开后把 PinTop 拖到 Applications）"

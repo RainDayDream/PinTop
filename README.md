@@ -45,7 +45,7 @@ curl -fL --retry 3 -o /tmp/PinTop.dmg https://github.com/RainDayDream/PinTop/rel
 
 **卸载**：退出 PinTop，把 `/Applications/PinTop.app` 移到废纸篓；可选：`tccutil reset All com.raindaydream.pintop` 清除授权记录。
 
-> 只运行「应用程序」里的那一份 PinTop。DMG 里或 `build/` 里的同名 App 与它是同一个 Bundle ID，混着运行可能让授权状态错乱。
+> 只运行「应用程序」里的那一份 PinTop。DMG 里或 `build.noindex/` 里的同名 App 与它是同一个 Bundle ID，混着运行可能让授权状态错乱。
 
 ## 使用
 
@@ -109,8 +109,8 @@ macOS（SIP 开启）不允许第三方改变其他 App 窗口的层级：`AXRai
 需要 Xcode 命令行工具（`xcode-select --install`），macOS 14 及以上。
 
 ```bash
-./build.sh      # 生成 ./pintop（命令行）、build/PinTop.app、build/PinTop.dmg
-open build/PinTop.app
+./build.sh      # 生成 ./pintop（命令行）、build.noindex/PinTop.app、build.noindex/PinTop.dmg
+open build.noindex/PinTop.app
 ```
 
 构建使用 ad-hoc 签名并固定指定要求（只认 Bundle ID `com.raindaydream.pintop`），重新构建后系统授权仍然有效。
