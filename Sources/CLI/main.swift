@@ -20,7 +20,7 @@ func floatCmd(_ t: Win, allSpaces: Bool) -> Never {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)                  // 无 Dock 图标
     let m = Mirror(target: t, allSpaces: allSpaces)
-    m.onStop = { reason in print(reason); exit(reason.hasPrefix("目标窗口已关闭") ? 0 : 1) }
+    m.onStop = { reason in print(reason); exit(reason.hasPrefix("目标窗口已关闭") || reason.hasPrefix("已取消") ? 0 : 1) }
     m.begin()
     signal(SIGINT) { _ in print("\n已取消悬浮。"); exit(0) }
     signal(SIGTERM) { _ in exit(0) }

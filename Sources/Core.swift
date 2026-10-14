@@ -170,6 +170,34 @@ final class MirrorView: NSView {
     override func scrollWheel(with e: NSEvent) { owner?.scroll(e) }
 }
 
+/// 悬浮窗口右上角的“取消悬浮”浮标
+final class BadgeView: NSView {
+    weak var owner: Mirror?
+    let label = NSTextField(labelWithString: "✕ 取消悬浮")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.65).cgColor
+        layer?.cornerRadius = 7
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = .white
+        label.alignment = .center
+        label.frame = bounds.insetBy(dx: 4, dy: 2)
+        label.autoresizingMask = [.width, .height]
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with e: NSEvent) { owner?.finish("已取消悬浮") }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with e: NSEvent) { layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.85).cgColor }
+    override func mouseExited(with e: NSEvent) { layer?.backgroundColor = NSColor.black.withAlphaComponent(0.65).cgColor }
+}
+
 /// 目标窗口被盖住时，在最上层显示它的实时画面；点击时激活真窗口并转发鼠标操作。
 final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     /// 当前所有正在悬浮的窗口ID：多个悬浮窗口之间互不视为“盖住”对方，避免互相抢占
@@ -177,6 +205,8 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     let target: Win
     let allSpaces: Bool
     let panel: Panel
+    let badge: Panel
+    let badgeView = BadgeView(frame: NSRect(x: 0, y: 0, width: 82, height: 22))
     let view = MirrorView()
     let primaryH = NSScreen.screens.first?.frame.height ?? 0
     var stream: SCStream?
@@ -197,6 +227,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     init(target: Win, allSpaces: Bool) {
         self.target = target; self.allSpaces = allSpaces
         panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        badge = Panel(contentRect: NSRect(x: 0, y: 0, width: 82, height: 22), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.level = allSpaces ? .statusBar : .floating   // 全屏桌面里需要更高层级
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
@@ -206,12 +237,20 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         view.layer?.contentsGravity = .resize
         view.owner = self
         panel.contentView = view
+        // 取消浮标：比镜像面板高一层，始终可点
+        badge.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
+        badge.isOpaque = false; badge.backgroundColor = .clear; badge.hasShadow = true
+        badge.hidesOnDeactivate = false; badge.isReleasedWhenClosed = false
+        badge.collectionBehavior = panel.collectionBehavior
+        badgeView.owner = self
+        badge.contentView = badgeView
         // 切换桌面后，重新应用桌面行为并强制重新显示（all 模式）
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self = self, self.allSpaces, !self.stopped else { return }
             self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            self.badge.collectionBehavior = self.panel.collectionBehavior
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.tick() }
         }
     }
@@ -233,6 +272,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         timer?.invalidate(); timer = nil
         if let o = observer { NSWorkspace.shared.notificationCenter.removeObserver(o); observer = nil }
         panel.orderOut(nil); panel.close()
+        badge.orderOut(nil); badge.close()
         if let s = stream { Task { try? await s.stopCapture() } }
         stream = nil
     }
@@ -322,6 +362,12 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
             panel.setFrame(nsFrame(bounds), display: true)
             if sizeChanged, let s = stream { configure(bounds.size); Task { try? await s.updateConfiguration(config) } }
         }
+        // 取消浮标：窗口在屏幕上（真窗口或镜像可见）时显示在其右上角，随窗口移动
+        if realOnScreen || show, lastFrame.width > 0 {
+            let f = nsFrame(lastFrame)
+            badge.setFrameOrigin(NSPoint(x: f.maxX - badge.frame.width - 10, y: f.maxY - badge.frame.height - 5))
+            if !badge.isVisible || !badge.isOnActiveSpace { badge.orderFrontRegardless() }
+        } else if badge.isVisible { badge.orderOut(nil) }
         if debug { print("tick show=\(show) realOnScreen=\(realOnScreen) visible=\(panel.isVisible) onActiveSpace=\(panel.isOnActiveSpace) visibleOnScreen=\(panel.occlusionState.contains(.visible)) frame=\(panel.frame.integral) screen=\(panel.screen != nil) level=\(panel.level.rawValue) frontApp=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")") }
         if show {
             // 窗口可能已 orderFront 但不在当前桌面（isVisible 仍为 true），所以同时检查 isOnActiveSpace

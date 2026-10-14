@@ -160,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.onStop = { [weak self] reason in
             DispatchQueue.main.async {
                 self?.pins[w.id] = nil; self?.pinInfo[w.id] = nil; self?.refreshMain()
-                if !reason.hasPrefix("目标窗口已关闭") { self?.notify("悬浮已停止", reason) }
+                if !reason.hasPrefix("目标窗口已关闭") && !reason.hasPrefix("已取消") { self?.notify("悬浮已停止", reason) }
             }
         }
         pins[w.id] = m
