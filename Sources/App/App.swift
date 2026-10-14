@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sizeField = NSTextField()
     let pinsStack = NSStackView()   // 正在悬浮：每个窗口一行
     var mainStack = NSStackView()
+    var tipLabel: NSTextField?
+    var lastFitHeight: CGFloat = 0     // 上一次按内容计算出的高度，用来判断用户有没有手动调过窗口高度
     var listedWins: [Win] = []
     var spaceChoices: [FloatScope] = []   // 范围下拉框的各项（当前桌面 / 所有桌面 / 每个具体桌面）
     var allowMulti = false          // 是否允许同时悬浮多个窗口
@@ -221,13 +223,30 @@ extension AppDelegate {
     func header(_ t: String) -> NSTextField {
         let l = NSTextField(labelWithString: t); l.font = .boldSystemFont(ofSize: 13); return l
     }
-    func row(_ views: [NSView]) -> NSStackView {
-        let r = NSStackView(views: views); r.orientation = .horizontal; r.spacing = 8; r.alignment = .centerY; return r
+    /// 水平一行。`stretch` 指定哪一项随窗口宽度伸缩；`spacer` 为 true 时在末尾加弹性空白（所有控件保持原大小）。
+    func row(_ views: [NSView], stretch: Int? = 0, spacer: Bool = false) -> NSStackView {
+        var vs = views
+        if spacer { vs.append(NSView()) }
+        let r = NSStackView(views: vs)
+        r.orientation = .horizontal; r.spacing = 8; r.alignment = .centerY; r.distribution = .fill
+        let flex = spacer ? vs.count - 1 : (stretch ?? -1)
+        for (i, v) in vs.enumerated() {
+            // 伸缩项用最低优先级，明确由它吸收多余的宽度；其余控件保持原大小
+            v.setContentHuggingPriority(i == flex ? NSLayoutConstraint.Priority(1) : .defaultHigh, for: .horizontal)
+            v.setContentCompressionResistancePriority(i == flex ? NSLayoutConstraint.Priority(1) : .defaultHigh, for: .horizontal)
+        }
+        return r
+    }
+
+    /// 文字标签被拉宽后默认会靠右显示，统一改为左对齐（可编辑的输入框不动）
+    func leftAlignLabels(_ v: NSView) {
+        if let t = v as? NSTextField, !t.isEditable { t.alignment = .left }
+        v.subviews.forEach(leftAlignLabels)
     }
 
     func buildMain() {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
-                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "PinTop"
         w.isReleasedWhenClosed = false
 
@@ -292,23 +311,48 @@ extension AppDelegate {
             header("权限"), row([axLabel, axBtn]), row([scLabel, scBtn]),
             header("1. 选择窗口"), row([winPopup, refresh]),
             header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),
-            header("   或：并排布局（把窗口摆到屏幕一侧）"), row([sidePopup, sizeField, dockBtn, restoreBtn]),
-            header("正在悬浮"), pinsStack, row([stopAll, multiBox]),
+            header("或：并排布局（把窗口摆到屏幕一侧）"), row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),
+            header("正在悬浮"), pinsStack, row([stopAll, multiBox], spacer: true),
             tip,
         ])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         stack.setCustomSpacing(14, after: stack.views[2]); stack.setCustomSpacing(14, after: stack.views[4])
         stack.setCustomSpacing(14, after: stack.views[8])
-        for v in [stack.views[1], stack.views[2], stack.views[4], stack.views[6], stack.views[8]] {
-            v.widthAnchor.constraint(equalToConstant: 440).isActive = true
-        }
-        tip.preferredMaxLayoutWidth = 440
+        pinsStack.alignment = .leading
+        // 长标题在下拉框里截断，而不是撑宽窗口
+        for p in [winPopup, spacePopup, sidePopup] { p.cell?.lineBreakMode = .byTruncatingTail }
+        tipLabel = tip
         mainStack = stack
-        w.contentView = stack
-        w.setContentSize(stack.fittingSize)
+
+        // 内容放进容器并贴住左右/上边：窗口变宽时内容跟着变宽
+        let container = NSView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        // 整行控件（下拉框/按钮行/列表/提示文字）贴住左右边缘，随窗口宽度伸缩；文字标题保持靠左
+        for v in stack.arrangedSubviews where v is NSStackView || v === tip {
+            v.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: stack.edgeInsets.left).isActive = true
+            v.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -stack.edgeInsets.right).isActive = true
+        }
+        leftAlignLabels(stack)
+        w.contentView = container
+        let fit = stack.fittingSize
+        w.setContentSize(NSSize(width: 480, height: fit.height))
+        lastFitHeight = fit.height
+        w.contentMinSize = NSSize(width: 440, height: fit.height)
         w.center()
+        w.setFrameAutosaveName("PinTopMainWindow")   // 记住上次的窗口大小和位置
         mainWin = w
+        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: w, queue: .main) { [weak self] _ in
+            guard let self = self, let w = self.mainWin else { return }
+            self.tipLabel?.preferredMaxLayoutWidth = max(100, w.contentLayoutRect.width - 40)
+            self.tipLabel?.invalidateIntrinsicContentSize()
+        }
 
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
             self?.refreshMain()
@@ -368,16 +412,27 @@ extension AppDelegate {
             let info = pinInfo[id]
             let name = NSTextField(labelWithString: "\(info?.app ?? "?") — \(info?.title ?? "")（\(info?.scope ?? "")）")
             name.lineBreakMode = .byTruncatingTail
-            name.widthAnchor.constraint(equalToConstant: 340).isActive = true
             let cancel = ClosureButton("取消") { [weak self] in self?.stopPin(id); self?.refreshMain() }
-            pinsStack.addArrangedSubview(row([name, cancel]))
+            let r = row([name, cancel])
+            pinsStack.addArrangedSubview(r)
+            r.leadingAnchor.constraint(equalTo: pinsStack.leadingAnchor).isActive = true
+            r.trailingAnchor.constraint(equalTo: pinsStack.trailingAnchor).isActive = true
         }
-        // 窗口高度随内容变化，保持左上角不动
+        leftAlignLabels(pinsStack)
+        // 窗口高度：用户没手动调过高度时随内容增减；调过则只保证不小于内容所需的最小高度
         if let w = mainWin {
-            let old = w.frame
-            w.setContentSize(mainStack.fittingSize)
-            var f = w.frame; f.origin.y = old.maxY - f.height
-            w.setFrame(f, display: true)
+            mainStack.layoutSubtreeIfNeeded()
+            let needH = mainStack.fittingSize.height
+            let curH = w.contentLayoutRect.height
+            let followContent = abs(curH - lastFitHeight) < 2
+            lastFitHeight = needH
+            w.contentMinSize = NSSize(width: 440, height: needH)
+            if followContent || curH < needH {
+                let old = w.frame
+                w.setContentSize(NSSize(width: w.contentLayoutRect.width, height: needH))
+                var f = w.frame; f.origin.y = old.maxY - f.height    // 保持左上角不动
+                w.setFrame(f, display: true)
+            }
         }
     }
 }
