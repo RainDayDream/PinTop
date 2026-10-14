@@ -182,12 +182,17 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     var lastFrame = CGRect.zero
     var pressed = false
     var realOnScreen = true
+    var fullscreenSpace = false      // 当前桌面是别的 App 的全屏桌面（真窗口在这里不可见）
+    var live: Bool { realOnScreen && !fullscreenSpace }
+    var candidate = CGRect.zero
+    var lastBuffer: CVPixelBuffer?
+    let debug = ProcessInfo.processInfo.environment["PINTOP_DEBUG"] != nil
 
     init(target: Win, allSpaces: Bool) {
         self.target = target; self.allSpaces = allSpaces
         panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
-        panel.level = .floating
+        panel.level = allSpaces ? .statusBar : .floating   // 全屏桌面里需要更高层级
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.hidesOnDeactivate = false; panel.isReleasedWhenClosed = false
         panel.collectionBehavior = allSpaces ? [.canJoinAllSpaces, .fullScreenAuxiliary] : [.fullScreenAuxiliary]
@@ -195,6 +200,14 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         view.layer?.contentsGravity = .resize
         view.owner = self
         panel.contentView = view
+        // 切换桌面后，重新应用桌面行为并强制重新显示（all 模式）
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.allSpaces else { return }
+            self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.tick() }
+        }
     }
 
     func configure(_ size: CGSize) {
@@ -225,7 +238,12 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
               let raw = atts.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
               let pb = CMSampleBufferGetImageBuffer(sb),
               let surf = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() else { return }
-        DispatchQueue.main.async { self.view.layer?.contents = surf }
+        // 真窗口不在当前桌面时系统给的是空白帧：冻结最后一帧有效画面，并持有其缓冲区避免被复用
+        DispatchQueue.main.async {
+            guard self.live else { return }
+            self.lastBuffer = pb
+            self.view.layer?.contents = surf
+        }
     }
 
     func stream(_ s: SCStream, didStopWithError error: Error) {
@@ -242,21 +260,40 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
         let wins = pinnableWindows()
         var bounds = lastFrame
         var show: Bool
+        // 全屏桌面检测：别的 App 的窗口恰好铺满整块屏幕（含菜单栏区域）
+        let primH = primaryH
+        fullscreenSpace = allSpaces && wins.contains { w in
+            w.pid != target.pid && NSScreen.screens.contains { sc in
+                abs(w.bounds.width - sc.frame.width) < 2 && abs(w.bounds.height - sc.frame.height) < 2
+                && abs(w.bounds.minX - sc.frame.minX) < 2 && abs(w.bounds.minY - (primH - sc.frame.maxY)) < 2
+            }
+        }
         if let i = wins.firstIndex(where: { $0.id == target.id }) {
             realOnScreen = true; bounds = wins[i].bounds
             show = wins[..<i].contains { $0.bounds.width > 40 && $0.bounds.height > 40 && $0.bounds.intersects(bounds) }
         } else {
             realOnScreen = false; show = allSpaces       // 在其他桌面/已最小化
         }
+        if fullscreenSpace { show = true }
         if pressed { show = true }                      // 拖动期间不能隐藏，否则会丢失鼠标抬起事件
+        // 只采纳“稳定且在屏幕内”的位置：切换桌面时真窗口会随动画滑出屏幕，不能记成新位置
+        let prev = candidate; candidate = bounds
+        let screens = NSScreen.screens.map { NSRect(x: $0.frame.minX, y: primaryH - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height) }
+        let onScreenArea = screens.reduce(CGFloat(0)) { $0 + $1.intersection(bounds).area }
+        let onScreen = bounds.area > 0 && onScreenArea >= bounds.area * 0.9
+        let accept = live && onScreen && (bounds == prev || pressed || lastFrame == .zero)
+        if !accept { bounds = lastFrame }
         if bounds != lastFrame, bounds.width > 0 {
             let sizeChanged = bounds.size != lastFrame.size
             lastFrame = bounds
             panel.setFrame(nsFrame(bounds), display: true)
             if sizeChanged, let s = stream { configure(bounds.size); Task { try? await s.updateConfiguration(config) } }
         }
-        if show { if !panel.isVisible { panel.orderFrontRegardless() } }
-        else if panel.isVisible { panel.orderOut(nil) }
+        if debug { print("tick show=\(show) realOnScreen=\(realOnScreen) visible=\(panel.isVisible) onActiveSpace=\(panel.isOnActiveSpace) visibleOnScreen=\(panel.occlusionState.contains(.visible)) frame=\(panel.frame.integral) screen=\(panel.screen != nil) level=\(panel.level.rawValue) frontApp=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")") }
+        if show {
+            // 窗口可能已 orderFront 但不在当前桌面（isVisible 仍为 true），所以同时检查 isOnActiveSpace
+            if !panel.isVisible || !panel.isOnActiveSpace { panel.orderFrontRegardless() }
+        } else if panel.isVisible { panel.orderOut(nil) }
     }
 
     // MARK: 输入转发
@@ -272,7 +309,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func forward(_ e: NSEvent, _ t: CGEventType, _ b: CGMouseButton) {
-        guard realOnScreen else { return }               // 真窗口在别的桌面时，镜像只读，避免意外跳转桌面
+        guard live else { return }                       // 真窗口在别的桌面/全屏桌面时，镜像只读，避免意外跳转桌面
         let loc = NSEvent.mouseLocation
         let pt = CGPoint(x: loc.x, y: primaryH - loc.y)
         let n = Int64(e.clickCount)
@@ -289,7 +326,7 @@ final class Mirror: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func scroll(_ e: NSEvent) {
-        guard realOnScreen else { return }
+        guard live else { return }
         let loc = NSEvent.mouseLocation
         let units: CGScrollEventUnit = e.hasPreciseScrollingDeltas ? .pixel : .line
         guard let ev = CGEvent(scrollWheelEvent2Source: nil, units: units, wheelCount: 2,
