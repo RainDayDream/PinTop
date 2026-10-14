@@ -30,7 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sizeField = NSTextField()
     let pinsStack = NSStackView()   // 正在悬浮：每个窗口一行
     var mainStack = NSStackView()
-    var tipLabel: NSTextField?
     var lastFitHeight: CGFloat = 0     // 上一次按内容计算出的高度，用来判断用户有没有手动调过窗口高度
     var listedWins: [Win] = []
     var spaceChoices: [FloatScope] = []   // 范围下拉框的各项（当前桌面 / 所有桌面 / 每个具体桌面）
@@ -355,26 +354,24 @@ extension AppDelegate {
         multiAct.fn = { [weak self] in self?.allowMulti = (self?.multiBox.state == .on) }
         multiHolder = multiAct
 
-        let tip = NSTextField(wrappingLabelWithString:
-            "提示：镜像悬浮时，被盖住的窗口会在最上层显示实时画面，点击它即可继续操作。也可点屏幕顶部菜单栏的图钉图标快速使用。")
-        tip.font = .systemFont(ofSize: 11); tip.textColor = .secondaryLabelColor
-
+        // 并排布局是独立于“悬浮”的另一个功能：放在最下面，用分隔线隔开，避免和悬浮部分混淆
+        let separator = NSBox(); separator.boxType = .separator
         let stack = NSStackView(views: [
-            header("权限"), row([axLabel, axBtn]), row([scLabel, scBtn]),
-            header("1. 选择窗口"), row([winPopup, refresh]),
-            header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),
-            header("或：并排布局（把窗口摆到屏幕一侧）"), row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),
-            header("正在悬浮（从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),
-            tip,
+            header("权限"), row([axLabel, axBtn]), row([scLabel, scBtn]),                         // 0-2
+            header("1. 选择窗口"), row([winPopup, refresh]),                                       // 3-4
+            header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),              // 5-6
+            header("正在悬浮（从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),   // 7-9
+            separator,                                                                             // 10
+            header("并排布局（不是悬浮：把上面选中的窗口摆到屏幕一侧）"),                            // 11
+            row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),                        // 12
         ])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
-        stack.setCustomSpacing(14, after: stack.views[2]); stack.setCustomSpacing(14, after: stack.views[4])
-        stack.setCustomSpacing(14, after: stack.views[8])
+        for i in [2, 4, 6, 9] { stack.setCustomSpacing(14, after: stack.views[i]) }
+        stack.setCustomSpacing(12, after: separator)
         pinsStack.alignment = .leading
         // 长标题在下拉框里截断，而不是撑宽窗口
         for p in [winPopup, spacePopup, sidePopup] { p.cell?.lineBreakMode = .byTruncatingTail }
-        tipLabel = tip
         mainStack = stack
 
         // 内容放进容器并贴住左右/上边：窗口变宽时内容跟着变宽
@@ -387,7 +384,7 @@ extension AppDelegate {
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
         // 整行控件（下拉框/按钮行/列表/提示文字）贴住左右边缘，随窗口宽度伸缩；文字标题保持靠左
-        for v in stack.arrangedSubviews where v is NSStackView || v === tip {
+        for v in stack.arrangedSubviews where v is NSStackView || v is NSBox {
             v.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: stack.edgeInsets.left).isActive = true
             v.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -stack.edgeInsets.right).isActive = true
         }
@@ -402,11 +399,6 @@ extension AppDelegate {
         mainWin = w
         let levelTimer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in self?.updateMainWindowLevel() }
         RunLoop.main.add(levelTimer, forMode: .common)
-        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: w, queue: .main) { [weak self] _ in
-            guard let self = self, let w = self.mainWin else { return }
-            self.tipLabel?.preferredMaxLayoutWidth = max(100, w.contentLayoutRect.width - 40)
-            self.tipLabel?.invalidateIntrinsicContentSize()
-        }
 
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
             self?.refreshMain()
