@@ -28,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var axLabel = NSTextField(), scLabel = NSTextField()
     var winPopup = NSPopUpButton(), spacePopup = NSPopUpButton(), sidePopup = NSPopUpButton()
     var sizeField = NSTextField()
+    // 并排布局：自定义位置和大小
+    var layoutModePopup: ClosurePopup!
+    var sideRow = NSStackView(), customRow = NSStackView()
+    var layoutHint = NSTextField(labelWithString: "")
+    var xField = NSTextField(), yField = NSTextField(), wField = NSTextField(), hField = NSTextField()
     let pinsStack = NSStackView()   // 正在悬浮区域：「（无）」文字 或 可拖动排序的表格
     let pinTable = NSTableView()    // 每个悬浮窗口一行，支持拖动排序
     let pinScroll = NSScrollView()
@@ -241,6 +246,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard checkAccessibility() else { return }
         let r = applyDock(target: w, side: side, amount: amount, frame: nil, fit: [])
         if !r.ok { notify("摆放失败", r.messages.joined(separator: "\n")) }
+        else if r.messages.count > 1 { notify("已摆放，但与设置不完全一致", r.messages.dropFirst().joined(separator: "\n")) }
+    }
+
+    /// 摆到自定义的位置和大小。x、y 相对屏幕可用区域（避开菜单栏和 Dock）的左上角。
+    func dockFrame(_ w: Win, x: String, y: String, width: String, height: String) {
+        guard checkAccessibility() else { return }
+        // 先在这里校验，才能给出「哪一项填错了」的具体提示
+        let area = usableArea(for: w.bounds)
+        let parsed = parseCustomFrame(x: x, y: y, w: width, h: height, area: area)
+        guard parsed.rect != nil else { notify("位置和大小有误", parsed.error ?? "无法解析"); return }
+        let r = applyDock(target: w, side: nil, amount: "", frame: "\(x),\(y),\(width),\(height)", fit: [])
+        if !r.ok { notify("摆放失败", r.messages.joined(separator: "\n")) }
+        else if r.messages.count > 1 { notify("已摆放，但与设置不完全一致", r.messages.dropFirst().joined(separator: "\n")) }
+    }
+
+    /// 把选中窗口当前的位置和大小填进输入框（坐标相对屏幕可用区域左上角）
+    func fillCurrentFrame() {
+        guard let win = selectedWindow() else { return }
+        let fresh = pinnableWindows().first { $0.id == win.id } ?? win
+        let area = usableArea(for: fresh.bounds)
+        xField.stringValue = String(Int((fresh.bounds.minX - area.minX).rounded()))
+        yField.stringValue = String(Int((fresh.bounds.minY - area.minY).rounded()))
+        wField.stringValue = String(Int(fresh.bounds.width.rounded()))
+        hField.stringValue = String(Int(fresh.bounds.height.rounded()))
+    }
+
+    /// 切换并排布局的模式：0 = 靠屏幕一侧，1 = 自定义位置和大小
+    func updateLayoutMode() {
+        let custom = layoutModePopup.indexOfSelectedItem == 1
+        sideRow.isHidden = custom
+        customRow.isHidden = !custom
+        layoutHint.isHidden = !custom
+        if custom, xField.stringValue.isEmpty, yField.stringValue.isEmpty { fillCurrentFrame() }   // 第一次切换时先填入当前值，方便微调
+        if let w = mainWin, w.contentView != nil { refreshMain() }
     }
 }
 
@@ -329,14 +368,36 @@ extension AppDelegate {
             self.refreshMain()
         }
 
-        // 并排布局
+        // 并排布局：两种模式 —— 靠屏幕一侧 / 自定义位置和大小
         sidePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         sidePopup.addItems(withTitles: ["靠右", "靠左", "靠上", "靠下"])
         sizeField = NSTextField(string: "35%"); sizeField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        sizeField.placeholderString = "35% 或 600"
+        layoutModePopup = ClosurePopup(items: ["靠屏幕一侧（靠右/左/上/下 + 大小）", "自定义位置和大小（X、Y、宽、高）"], selected: 0) { [weak self] _ in
+            DispatchQueue.main.async { self?.updateLayoutMode() }
+        }
+        func coordField(_ f: NSTextField, _ placeholder: String) -> NSTextField {
+            f.placeholderString = placeholder; f.alignment = .left
+            f.widthAnchor.constraint(equalToConstant: 62).isActive = true; return f
+        }
+        func tag(_ t: String) -> NSTextField { let l = NSTextField(labelWithString: t); l.textColor = .secondaryLabelColor; return l }
+        let readBtn = ClosureButton("读取当前窗口") { [weak self] in self?.fillCurrentFrame() }
+        readBtn.toolTip = "把选中窗口现在的位置和大小填进来，再改一改"
+        sideRow = row([sidePopup, sizeField], spacer: true)
+        customRow = row([tag("X"), coordField(xField, "0"), tag("Y"), coordField(yField, "0"),
+                         tag("宽"), coordField(wField, "800"), tag("高"), coordField(hField, "600"), readBtn], spacer: true)
+        layoutHint = NSTextField(wrappingLabelWithString: "X、Y 是窗口左上角相对屏幕可用区域（菜单栏下方、Dock 之外）左上角的位置；单位像素，也可写百分比，如 50%。")
+        layoutHint.font = .systemFont(ofSize: 11); layoutHint.textColor = .secondaryLabelColor
+        customRow.isHidden = true; layoutHint.isHidden = true      // 默认是“靠屏幕一侧”
         let dockBtn = ClosureButton("摆放") { [weak self] in
             guard let self = self, let win = self.selectedWindow() else { return }
-            let side: Side = [Side.right, .left, .top, .bottom][self.sidePopup.indexOfSelectedItem]
-            self.dock(win, side, self.sizeField.stringValue.trimmingCharacters(in: .whitespaces))
+            if self.layoutModePopup.indexOfSelectedItem == 1 {
+                self.dockFrame(win, x: self.xField.stringValue, y: self.yField.stringValue,
+                               width: self.wField.stringValue, height: self.hField.stringValue)
+            } else {
+                let side: Side = [Side.right, .left, .top, .bottom][self.sidePopup.indexOfSelectedItem]
+                self.dock(win, side, self.sizeField.stringValue.trimmingCharacters(in: .whitespaces))
+            }
             self.refreshMain()
         }
         let restoreBtn = ClosureButton("恢复原位置") { [weak self] in
@@ -390,8 +451,10 @@ extension AppDelegate {
             header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),              // 5-6
             header("正在悬浮（拖动 ☰ 调整顺序，从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),   // 7-9
             separator,                                                                             // 10
-            header("并排布局（不是悬浮：把上面选中的窗口摆到屏幕一侧）"),                            // 11
-            row([sidePopup, sizeField, dockBtn, restoreBtn], spacer: true),                        // 12
+            header("并排布局（不是悬浮：调整上面选中窗口的位置和大小）"),                            // 11
+            layoutModePopup,                                                                       // 12 模式
+            sideRow, customRow, layoutHint,                                                        // 13-15 按模式显示其一
+            row([dockBtn, restoreBtn], spacer: true),                                              // 16
         ])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
@@ -399,7 +462,7 @@ extension AppDelegate {
         stack.setCustomSpacing(12, after: separator)
         pinsStack.alignment = .leading
         // 长标题在下拉框里截断，而不是撑宽窗口
-        for p in [winPopup, spacePopup, sidePopup] { p.cell?.lineBreakMode = .byTruncatingTail }
+        for p in [winPopup, spacePopup, sidePopup, layoutModePopup!] { p.cell?.lineBreakMode = .byTruncatingTail }
         mainStack = stack
 
         // 内容放进容器并贴住左右/上边：窗口变宽时内容跟着变宽
@@ -412,7 +475,7 @@ extension AppDelegate {
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
         // 整行控件（下拉框/按钮行/列表/提示文字）贴住左右边缘，随窗口宽度伸缩；文字标题保持靠左
-        for v in stack.arrangedSubviews where v is NSStackView || v is NSBox {
+        for v in stack.arrangedSubviews where v is NSStackView || v is NSBox || v === layoutHint || v === layoutModePopup {
             v.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: stack.edgeInsets.left).isActive = true
             v.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -stack.edgeInsets.right).isActive = true
         }
@@ -425,6 +488,12 @@ extension AppDelegate {
         w.center()
         w.setFrameAutosaveName("PinTopMainWindow")   // 记住上次的窗口大小和位置
         mainWin = w
+        // 自定义模式的说明文字会自动换行：窗口宽度变化时同步换行宽度
+        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: w, queue: .main) { [weak self] _ in
+            guard let self = self, let w = self.mainWin else { return }
+            self.layoutHint.preferredMaxLayoutWidth = max(100, w.contentLayoutRect.width - 40)
+            self.layoutHint.invalidateIntrinsicContentSize()
+        }
         let levelTimer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in self?.updateMainWindowLevel() }
         RunLoop.main.add(levelTimer, forMode: .common)
 

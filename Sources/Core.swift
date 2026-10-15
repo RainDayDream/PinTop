@@ -59,6 +59,23 @@ func displayTitle(_ w: Win) -> String {
     return "(无标题)"
 }
 
+/// 读取窗口当前的实际位置和大小（全局坐标，左上原点）。
+func axFrame(_ ax: AXUIElement) -> CGRect? {
+    var pr: CFTypeRef?, sr: CFTypeRef?
+    var p = CGPoint.zero, s = CGSize.zero
+    guard AXUIElementCopyAttributeValue(ax, kAXPositionAttribute as CFString, &pr) == .success,
+          AXUIElementCopyAttributeValue(ax, kAXSizeAttribute as CFString, &sr) == .success,
+          let pv = pr, let sv = sr,
+          AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return nil }
+    return CGRect(origin: p, size: s)
+}
+
+/// 期望与实际的 frame 是否基本一致（容差 2 像素）。
+func framesMatch(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 2) -> Bool {
+    abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance
+        && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+}
+
 /// 设置窗口 frame。先缩放再移动再缩放，兼容有最小尺寸/跨屏的窗口。
 @discardableResult
 func setFrame(_ ax: AXUIElement, _ r: CGRect) -> Bool {
@@ -111,12 +128,29 @@ func split(_ area: CGRect, side: Side, amount: String) -> (CGRect, CGRect)? {
     }
 }
 
-func parseFrame(_ s: String, area: CGRect) -> CGRect? {
-    let p = s.split(separator: ",").map(String.init)
-    guard p.count == 4,
-          let x = parseLength(p[0], total: area.width), let y = parseLength(p[1], total: area.height),
-          let w = parseLength(p[2], total: area.width), let h = parseLength(p[3], total: area.height) else { return nil }
-    return CGRect(x: area.minX + x, y: area.minY + y, width: w, height: h)
+/// 解析并校验“自定义位置和大小”。x、y 相对于屏幕可用区域（避开菜单栏和 Dock）的左上角；
+/// 每项可以是像素（如 `100`）或相对可用区域的百分比（如 `50%`）。返回矩形（全局坐标，左上原点）或出错提示。
+func parseCustomFrame(x: String, y: String, w: String, h: String, area: CGRect) -> (rect: CGRect?, error: String?) {
+    func field(_ name: String, _ raw: String, total: CGFloat) -> (CGFloat?, String?) {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty { return (nil, "请填写「\(name)」") }
+        guard let v = parseLength(s, total: total) else { return (nil, "「\(name)」格式不对：写像素（如 100）或百分比（如 50%）") }
+        return (v, nil)
+    }
+    let fx = field("X", x, total: area.width), fy = field("Y", y, total: area.height)
+    let fw = field("宽", w, total: area.width), fh = field("高", h, total: area.height)
+    for f in [fx, fy, fw, fh] { if let e = f.1 { return (nil, e) } }
+    let rect = CGRect(x: area.minX + fx.0!, y: area.minY + fy.0!, width: fw.0!, height: fh.0!)
+    if rect.width < 50 || rect.height < 50 { return (nil, "宽和高至少 50 像素") }
+    if !rect.intersects(area) { return (nil, "位置超出了屏幕可用区域，窗口会跑到屏幕外") }
+    return (rect, nil)
+}
+
+/// 命令行用：`x,y,w,h`
+func parseFrame(_ s: String, area: CGRect) -> (rect: CGRect?, error: String?) {
+    let p = s.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+    guard p.count == 4 else { return (nil, "格式应为 x,y,w,h（像素或百分比）") }
+    return parseCustomFrame(x: p[0], y: p[1], w: p[2], h: p[3], area: area)
 }
 
 // MARK: - 备份/恢复
@@ -530,7 +564,8 @@ func applyDock(target: Win, side: Side?, amount: String, frame: String?, fit: [W
     let targetRect: CGRect
     var rest: CGRect? = nil
     if let f = frame {
-        guard let r = parseFrame(f, area: area) else { return (false, ["--frame 格式应为 x,y,w,h（像素或百分比）"]) }
+        let parsed = parseFrame(f, area: area)
+        guard let r = parsed.rect else { return (false, [parsed.error ?? "无法解析位置和大小"]) }
         targetRect = r
     } else {
         guard let s = side, let parts = split(area, side: s, amount: amount) else { return (false, ["无法解析位置/大小参数"]) }
@@ -540,6 +575,10 @@ func applyDock(target: Win, side: Side?, amount: String, frame: String?, fit: [W
     save([record(target)] + fit.map(record))
     let ok = setFrame(ax, targetRect)
     msgs.append(ok ? "已摆放：\(target.app)" : "该窗口拒绝被调整大小/位置（例如全屏或固定大小的窗口）")
+    // 读回实际结果：窗口常有最小/最大尺寸限制，实际可能与设置不同，要如实告诉用户
+    if ok, let actual = axFrame(ax), !framesMatch(actual, targetRect) {
+        msgs.append("窗口有尺寸限制，实际为：位置 \(Int(actual.minX - area.minX)),\(Int(actual.minY - area.minY))，大小 \(Int(actual.width))×\(Int(actual.height))（设置的是 \(Int(targetRect.minX - area.minX)),\(Int(targetRect.minY - area.minY))，\(Int(targetRect.width))×\(Int(targetRect.height))）")
+    }
     if !fit.isEmpty {
         if let rest = rest {
             for w in fit {
