@@ -25,7 +25,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pinInfo: [CGWindowID: (app: String, title: String, scope: String)] = [:]
     // 主窗口控件
     var mainWin: NSWindow?
-    var axLabel = NSTextField(), scLabel = NSTextField()
+    // 权限：缺权限时才在顶部显示提示条；底部状态栏有「权限」按钮随时查看
+    let permBanner = CardView(fill: NSColor.systemOrange.withAlphaComponent(0.16), radius: 8)
+    let permLabel = NSTextField(labelWithString: "")
+    var permAXBtn: ClosureButton!
+    var permSCBtn: ClosureButton!
+    var permBtn: ClosureButton!
+    // 「窗口操作」卡片：选窗口 + 切换功能（镜像悬浮 / 并排布局）
+    var tabSegment: ClosureSegmented!
+    var floatPanel = NSStackView(), layoutPanel = NSStackView()
     var winPopup = NSPopUpButton(), spacePopup = NSPopUpButton(), sidePopup = NSPopUpButton()
     var sizeField = NSTextField()
     // 并排布局：自定义位置和大小
@@ -47,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pinOrder: [CGWindowID] = []     // 悬浮堆叠顺序，下标 0 = 最顶层
     // 应用内更新
     let updater = Updater()
-    let updateBanner = NSStackView()                       // 主窗口顶部的「发现新版本」横幅
+    let updateBanner = CardView(fill: NSColor.controlAccentColor.withAlphaComponent(0.14), radius: 8)   // 主窗口顶部的「发现新版本」横幅
     let bannerLabel = NSTextField(labelWithString: "")
     let bannerProgress = NSProgressIndicator()
     var bannerNotesBtn: ClosureButton!
@@ -317,6 +325,46 @@ final class ClosureButton: NSButton {
     @objc func fire() { fn?() }
 }
 
+/// 带圆角背景的容器（卡片/提示条）。颜色随深浅色模式自动更新。
+final class CardView: NSStackView {
+    private var fill: NSColor, border: NSColor?, radius: CGFloat
+    init(fill: NSColor, border: NSColor? = nil, radius: CGFloat) {
+        self.fill = fill; self.border = border; self.radius = radius
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    func setViews(_ views: [NSView], insets: NSEdgeInsets, spacing: CGFloat) {
+        views.forEach { addArrangedSubview($0) }
+        edgeInsets = insets; self.spacing = spacing
+    }
+    /// 提示条：一行内容，四周留白
+    func setContent(_ content: NSStackView) {
+        addArrangedSubview(content)
+        edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        content.widthAnchor.constraint(equalTo: widthAnchor, constant: -24).isActive = true
+    }
+    private func applyColors() {
+        layer?.cornerRadius = radius
+        layer?.borderWidth = border == nil ? 0 : 1
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = fill.cgColor
+            layer?.borderColor = border?.cgColor
+        }
+    }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); applyColors() }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyColors() }
+}
+
+final class ClosureSegmented: NSSegmentedControl {
+    var fn: ((Int) -> Void)?
+    convenience init(labels: [String], _ fn: @escaping (Int) -> Void) {
+        self.init(labels: labels, trackingMode: .selectOne, target: nil, action: nil)
+        self.fn = fn; target = self; action = #selector(fire)
+    }
+    @objc func fire() { fn?(selectedSegment) }
+}
+
 final class ClosurePopup: NSPopUpButton {
     var fn: ((Int) -> Void)?
     convenience init(items: [String], selected: Int, _ fn: @escaping (Int) -> Void) {
@@ -367,14 +415,6 @@ extension AppDelegate {
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "PinTop"
         w.isReleasedWhenClosed = false
-
-        // 权限
-        axLabel = NSTextField(labelWithString: ""); scLabel = NSTextField(labelWithString: "")
-        let axBtn = ClosureButton("授权") { [weak self] in _ = self?.checkAccessibility() }
-        let scBtn = ClosureButton("授权") {
-            if !CGPreflightScreenCaptureAccess() { _ = CGRequestScreenCaptureAccess() }
-            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
-        }
 
         // 选择窗口
         winPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -466,24 +506,8 @@ extension AppDelegate {
         multiAct.fn = { [weak self] in self?.allowMulti = (self?.multiBox.state == .on) }
         multiHolder = multiAct
 
-        // 并排布局是独立于“悬浮”的另一个功能：放在最下面，用分隔线隔开，避免和悬浮部分混淆
-        let separator = NSBox(); separator.boxType = .separator
-        let stack = NSStackView(views: [
-            header("权限"), row([axLabel, axBtn]), row([scLabel, scBtn]),                         // 0-2
-            header("1. 选择窗口"), row([winPopup, refresh]),                                       // 3-4
-            header("2. 镜像悬浮（窗口始终显示在最上层）"), row([spacePopup, floatBtn]),              // 5-6
-            header("正在悬浮（拖动 ☰ 调整顺序，从上到下 = 从顶层到底层）"), pinsStack, row([stopAll, multiBox], spacer: true),   // 7-9
-            separator,                                                                             // 10
-            header("并排布局（不是悬浮：调整上面选中窗口的位置和大小）"),                            // 11
-            layoutModePopup,                                                                       // 12 模式
-            sideRow, customRow, layoutHint,                                                        // 13-15 按模式显示其一
-            row([dockBtn, restoreBtn], spacer: true),                                              // 16
-        ])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
-        for i in [2, 4, 6, 9] { stack.setCustomSpacing(14, after: stack.views[i]) }
-
-        // —— 应用内更新：顶部横幅（默认隐藏）+ 底部版本行 ——
+        // —— 布局：（缺权限/有更新时才出现的提示条）→「窗口操作」卡片 → 正在悬浮 → 底部状态栏 ——
+        // 提示条：更新横幅、权限提示（默认都隐藏）
         bannerLabel.lineBreakMode = .byTruncatingTail; bannerLabel.font = .systemFont(ofSize: 13, weight: .medium)
         bannerProgress.isIndeterminate = false; bannerProgress.minValue = 0; bannerProgress.maxValue = 1
         bannerProgress.controlSize = .small; bannerProgress.widthAnchor.constraint(equalToConstant: 90).isActive = true
@@ -491,25 +515,49 @@ extension AppDelegate {
             if let u = self?.updater.latest?.pageURL { NSWorkspace.shared.open(u) }
         }
         bannerActionBtn = ClosureButton("立即更新") { [weak self] in self?.updater.startUpdate() }
-        bannerActionBtn.bezelStyle = .rounded; bannerActionBtn.keyEquivalent = ""
-        let bannerRow = row([bannerLabel, bannerProgress, bannerNotesBtn, bannerActionBtn], stretch: 0)
-        updateBanner.orientation = .vertical; updateBanner.addArrangedSubview(bannerRow)
-        updateBanner.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        updateBanner.wantsLayer = true
-        updateBanner.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
-        updateBanner.layer?.cornerRadius = 8
-        bannerRow.widthAnchor.constraint(equalTo: updateBanner.widthAnchor, constant: -24).isActive = true
+        bannerActionBtn.keyEquivalent = ""
+        updateBanner.setContent(row([bannerLabel, bannerProgress, bannerNotesBtn, bannerActionBtn], stretch: 0))
         updateBanner.isHidden = true
-        stack.insertArrangedSubview(updateBanner, at: 0)
-        stack.setCustomSpacing(14, after: updateBanner)
 
+        permLabel.font = .systemFont(ofSize: 13, weight: .medium); permLabel.lineBreakMode = .byTruncatingTail
+        permAXBtn = ClosureButton("授权辅助功能") { [weak self] in self?.requestAccessibility() }
+        permSCBtn = ClosureButton("授权屏幕录制") { [weak self] in self?.requestScreenRecording() }
+        permBanner.setContent(row([permLabel, permAXBtn, permSCBtn], stretch: 0))
+        permBanner.isHidden = true
+
+        // 「窗口操作」卡片：先选窗口，再选对它做什么。两个功能共用这一个窗口，所以放在同一个框里。
+        let selRow = row([tag("窗口"), winPopup, refresh], stretch: 1)
+        tabSegment = ClosureSegmented(labels: ["镜像悬浮", "并排布局"]) { [weak self] idx in self?.showTab(idx) }
+        let actRow = row([tag("对它执行"), tabSegment], spacer: true)
+        let rule = NSBox(); rule.boxType = .separator
+        floatPanel = NSStackView(views: [row([spacePopup, floatBtn])])
+        layoutPanel = NSStackView(views: [layoutModePopup, sideRow, customRow, layoutHint, row([dockBtn, restoreBtn], spacer: true)])
+        for p in [floatPanel, layoutPanel] { p.orientation = .vertical; p.alignment = .leading; p.spacing = 8 }
+        let card = CardView(fill: .controlBackgroundColor, border: .separatorColor, radius: 10)
+        card.setViews([selRow, actRow, rule, floatPanel, layoutPanel], insets: NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14), spacing: 10)
+        tabSegment.selectedSegment = UserDefaults.standard.integer(forKey: "pintop.tab") == 1 ? 1 : 0
+        floatPanel.isHidden = tabSegment.selectedSegment != 0
+        layoutPanel.isHidden = tabSegment.selectedSegment != 1
+
+        let stack = NSStackView(views: [
+            updateBanner, permBanner,                                                              // 提示条（有内容才显示）
+            card,                                                                                  // 窗口操作
+            header("正在悬浮（拖动 ☰ 调整顺序，从上到下 = 从顶层到底层）"), pinsStack,               // 全局状态：所有悬浮窗口
+            row([stopAll, multiBox], spacer: true),
+        ])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        stack.setCustomSpacing(12, after: updateBanner); stack.setCustomSpacing(12, after: permBanner)
+        stack.setCustomSpacing(20, after: card)
+
+        // 底部状态栏：版本、更新状态、权限、检查更新
         versionLabel.stringValue = "PinTop \(updater.currentVersion)"; versionLabel.textColor = .secondaryLabelColor
         updateStatusLabel.textColor = .secondaryLabelColor; updateStatusLabel.lineBreakMode = .byTruncatingTail
+        permBtn = ClosureButton("权限") { [weak self] in self?.showPermissionMenu() }
         checkUpdateBtn = ClosureButton("检查更新") { [weak self] in self?.updater.check(manual: true) }
-        let versionRow = row([versionLabel, updateStatusLabel, checkUpdateBtn], stretch: 1)
+        let versionRow = row([versionLabel, updateStatusLabel, permBtn, checkUpdateBtn], stretch: 1)
         stack.addArrangedSubview(versionRow)
-        stack.setCustomSpacing(16, after: stack.views[stack.views.count - 2])
-        stack.setCustomSpacing(12, after: separator)
+        stack.setCustomSpacing(20, after: stack.views[stack.views.count - 2])
         pinsStack.alignment = .leading
         // 长标题在下拉框里截断，而不是撑宽窗口
         for p in [winPopup, spacePopup, sidePopup, layoutModePopup!] { p.cell?.lineBreakMode = .byTruncatingTail }
@@ -524,11 +572,8 @@ extension AppDelegate {
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
-        // 整行控件（下拉框/按钮行/列表/提示文字）贴住左右边缘，随窗口宽度伸缩；文字标题保持靠左
-        for v in stack.arrangedSubviews where v is NSStackView || v is NSBox || v === layoutHint || v === layoutModePopup {
-            v.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: stack.edgeInsets.left).isActive = true
-            v.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -stack.edgeInsets.right).isActive = true
-        }
+        // 整行控件（下拉框/按钮行/卡片/列表/提示文字）贴住左右边缘，随窗口宽度伸缩；文字标题保持靠左
+        for s in [stack, card, floatPanel, layoutPanel] { pinFullWidth(s) }
         leftAlignLabels(stack)
         w.contentView = container
         let fit = stack.fittingSize
@@ -562,8 +607,50 @@ extension AppDelegate {
 
     func refreshPermissions() {
         guard mainWin != nil else { return }
-        axLabel.stringValue = "辅助功能（摆放/点击转发）：" + (hasAccessibility(prompt: false) ? "✓ 已授权" : "✗ 未授权")
-        scLabel.stringValue = "屏幕录制（镜像悬浮）：" + (CGPreflightScreenCaptureAccess() ? "✓ 已授权" : "✗ 未授权")
+        let ax = hasAccessibility(prompt: false), sc = CGPreflightScreenCaptureAccess()
+        // 都已授权就不占任何位置；缺权限才在顶部出现提示条
+        let missing = [ax ? nil : "辅助功能", sc ? nil : "屏幕录制"].compactMap { $0 }
+        let changed = permBanner.isHidden != missing.isEmpty
+        permBanner.isHidden = missing.isEmpty
+        permLabel.stringValue = "需要授权才能使用：" + missing.joined(separator: "、")
+        permAXBtn.isHidden = ax; permSCBtn.isHidden = sc
+        permBtn?.title = missing.isEmpty ? "权限 ✓" : "权限 ⚠︎"
+        if changed { adjustMainHeight() }
+    }
+
+    func requestAccessibility() { _ = checkAccessibility() }
+
+    func requestScreenRecording() {
+        if !CGPreflightScreenCaptureAccess() { _ = CGRequestScreenCaptureAccess() }
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+    }
+
+    /// 底部「权限」按钮：弹出菜单显示两项权限的状态，点击可去授权/打开系统设置
+    func showPermissionMenu() {
+        let ax = hasAccessibility(prompt: false), sc = CGPreflightScreenCaptureAccess()
+        let m = NSMenu()
+        m.addItem(item("辅助功能（摆放窗口、点击转发）：" + (ax ? "✓ 已授权" : "✗ 未授权，点击授权")) { [weak self] in
+            if ax { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!) }
+            else { self?.requestAccessibility() }
+        })
+        m.addItem(item("屏幕录制（镜像悬浮）：" + (sc ? "✓ 已授权" : "✗ 未授权，点击授权")) { [weak self] in self?.requestScreenRecording() })
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: permBtn.bounds.height + 4), in: permBtn)
+    }
+
+    /// 切换「对选中窗口执行」的功能：0 = 镜像悬浮，1 = 并排布局
+    func showTab(_ idx: Int) {
+        floatPanel.isHidden = idx != 0
+        layoutPanel.isHidden = idx != 1
+        UserDefaults.standard.set(idx, forKey: "pintop.tab")
+        if mainWin != nil { adjustMainHeight() }
+    }
+
+    /// 把 `s` 里的整行控件（水平行、分隔线、下拉框、提示文字）贴住左右边缘。
+    func pinFullWidth(_ s: NSStackView) {
+        for v in s.arrangedSubviews where v is NSStackView || v is NSBox || v === layoutHint || v === layoutModePopup {
+            v.leadingAnchor.constraint(equalTo: s.leadingAnchor, constant: s.edgeInsets.left).isActive = true
+            v.trailingAnchor.constraint(equalTo: s.trailingAnchor, constant: -s.edgeInsets.right).isActive = true
+        }
     }
 
     /// 窗口高度：用户没手动调过高度时随内容增减；调过则只保证不小于内容所需的最小高度
