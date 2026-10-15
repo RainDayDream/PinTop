@@ -45,6 +45,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var spaceChoices: [FloatScope] = []   // 范围下拉框的各项（当前桌面 / 所有桌面 / 每个具体桌面）
     var forceRaiseUntil = Date.distantPast     // 在此时间之前，主窗口强制保持在镜像之上
     var pinOrder: [CGWindowID] = []     // 悬浮堆叠顺序，下标 0 = 最顶层
+    // 应用内更新
+    let updater = Updater()
+    let updateBanner = NSStackView()                       // 主窗口顶部的「发现新版本」横幅
+    let bannerLabel = NSTextField(labelWithString: "")
+    let bannerProgress = NSProgressIndicator()
+    var bannerNotesBtn: ClosureButton!
+    var bannerActionBtn: ClosureButton!
+    let versionLabel = NSTextField(labelWithString: "")      // 底部：「PinTop 1.0.0」
+    let updateStatusLabel = NSTextField(labelWithString: "")  // 底部：「已是最新版本」等
+    var checkUpdateBtn: ClosureButton!
     var allowMulti = false          // 是否允许同时悬浮多个窗口
     var multiBox = NSButton()
     var multiHolder: ClosureButton?   // 持有复选框动作的目标（NSButton.target 为弱引用）
@@ -55,7 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        updater.onChange = { [weak self] in self?.refreshUpdateUI() }
         showMain()
+        updater.startAutoChecking()      // 启动后检查一次，之后每 6 小时一次
     }
 
     // 再次点击应用图标（已在运行）时重新显示提示
@@ -83,6 +95,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        if updater.updateAvailable, let l = updater.latest {
+            let busy: Bool = { switch updater.state { case .downloading, .installing: return true; default: return false } }()
+            let it = item(busy ? "正在更新到 V\(l.version)…" : "⬆︎ 发现新版本 V\(l.version) — 点击更新", enabled: !busy) { [weak self] in
+                self?.showMain(); self?.updater.startUpdate()
+            }
+            menu.addItem(it)
+            menu.addItem(.separator())
+        }
         let wins = pinnableWindows()
 
         let floatCur = NSMenuItem(title: "镜像悬浮（当前桌面）", action: nil, keyEquivalent: "")
@@ -161,6 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(perm)
 
         menu.addItem(.separator())
+        menu.addItem(item("检查更新…（当前版本 \(updater.currentVersion)）") { [weak self] in
+            self?.showMain(); self?.updater.check(manual: true)
+        })
         menu.addItem(item("退出 PinTop") { NSApp.terminate(nil) })
     }
 
@@ -459,6 +482,33 @@ extension AppDelegate {
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8   // 标题等文字靠左
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         for i in [2, 4, 6, 9] { stack.setCustomSpacing(14, after: stack.views[i]) }
+
+        // —— 应用内更新：顶部横幅（默认隐藏）+ 底部版本行 ——
+        bannerLabel.lineBreakMode = .byTruncatingTail; bannerLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        bannerProgress.isIndeterminate = false; bannerProgress.minValue = 0; bannerProgress.maxValue = 1
+        bannerProgress.controlSize = .small; bannerProgress.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        bannerNotesBtn = ClosureButton("更新内容") { [weak self] in
+            if let u = self?.updater.latest?.pageURL { NSWorkspace.shared.open(u) }
+        }
+        bannerActionBtn = ClosureButton("立即更新") { [weak self] in self?.updater.startUpdate() }
+        bannerActionBtn.bezelStyle = .rounded; bannerActionBtn.keyEquivalent = ""
+        let bannerRow = row([bannerLabel, bannerProgress, bannerNotesBtn, bannerActionBtn], stretch: 0)
+        updateBanner.orientation = .vertical; updateBanner.addArrangedSubview(bannerRow)
+        updateBanner.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        updateBanner.wantsLayer = true
+        updateBanner.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+        updateBanner.layer?.cornerRadius = 8
+        bannerRow.widthAnchor.constraint(equalTo: updateBanner.widthAnchor, constant: -24).isActive = true
+        updateBanner.isHidden = true
+        stack.insertArrangedSubview(updateBanner, at: 0)
+        stack.setCustomSpacing(14, after: updateBanner)
+
+        versionLabel.stringValue = "PinTop \(updater.currentVersion)"; versionLabel.textColor = .secondaryLabelColor
+        updateStatusLabel.textColor = .secondaryLabelColor; updateStatusLabel.lineBreakMode = .byTruncatingTail
+        checkUpdateBtn = ClosureButton("检查更新") { [weak self] in self?.updater.check(manual: true) }
+        let versionRow = row([versionLabel, updateStatusLabel, checkUpdateBtn], stretch: 1)
+        stack.addArrangedSubview(versionRow)
+        stack.setCustomSpacing(16, after: stack.views[stack.views.count - 2])
         stack.setCustomSpacing(12, after: separator)
         pinsStack.alignment = .leading
         // 长标题在下拉框里截断，而不是撑宽窗口
@@ -516,6 +566,67 @@ extension AppDelegate {
         scLabel.stringValue = "屏幕录制（镜像悬浮）：" + (CGPreflightScreenCaptureAccess() ? "✓ 已授权" : "✗ 未授权")
     }
 
+    /// 窗口高度：用户没手动调过高度时随内容增减；调过则只保证不小于内容所需的最小高度
+    func adjustMainHeight() {
+        if let w = mainWin {
+            mainStack.layoutSubtreeIfNeeded()
+            let needH = mainStack.fittingSize.height
+            let curH = w.contentLayoutRect.height
+            let followContent = abs(curH - lastFitHeight) < 2
+            lastFitHeight = needH
+            w.contentMinSize = NSSize(width: 440, height: needH)
+            if followContent || curH < needH {
+                let old = w.frame
+                w.setContentSize(NSSize(width: w.contentLayoutRect.width, height: needH))
+                var f = w.frame; f.origin.y = old.maxY - f.height    // 保持左上角不动
+                w.setFrame(f, display: true)
+            }
+        }
+    }
+
+    /// 根据 updater 的状态刷新：主窗口横幅、底部版本行、菜单栏图标旁的「↑」、Dock 角标。
+    func refreshUpdateUI() {
+        let cur = updater.currentVersion
+        let v = updater.latest.map { "V" + $0.version } ?? ""
+        var showBanner = false, text = "", progress: Double? = nil, actionTitle: String? = nil, showNotes = false
+        switch updater.state {
+        case .available:
+            showBanner = true; text = "发现新版本 \(v)（当前 \(cur)）"; actionTitle = "立即更新"; showNotes = true
+        case .downloading(let p):
+            showBanner = true; text = "正在下载 \(v)… \(Int(p * 100))%"; progress = p
+        case .installing:
+            showBanner = true; text = "正在安装 \(v)，完成后会自动重启…"
+        case .failed(let msg):
+            if updater.updateAvailable { showBanner = true; text = "更新失败：\(msg)"; actionTitle = "重试"; showNotes = true }
+        default: break
+        }
+        updateBanner.isHidden = !showBanner
+        bannerLabel.stringValue = text; bannerLabel.toolTip = text
+        bannerProgress.isHidden = progress == nil
+        if let p = progress { bannerProgress.doubleValue = p }
+        bannerActionBtn.isHidden = actionTitle == nil
+        if let t = actionTitle { bannerActionBtn.title = t }
+        bannerNotesBtn.isHidden = !showNotes
+
+        var status = ""
+        var busy = false
+        switch updater.state {
+        case .checking: status = "正在检查更新…"; busy = true
+        case .upToDate: status = "已是最新版本"
+        case .available: status = "有新版本 \(v)"
+        case .downloading, .installing: busy = true
+        case .failed(let msg): if !updater.updateAvailable { status = "检查更新失败：\(msg)" }
+        case .idle: break
+        }
+        updateStatusLabel.stringValue = status; updateStatusLabel.toolTip = status
+        checkUpdateBtn.isEnabled = !busy
+
+        // 菜单栏图标旁的「↑」和 Dock 角标：不打开主窗口也能感知到有新版本
+        statusItem?.button?.title = updater.updateAvailable ? " ↑" : ""
+        NSApp.dockTile.badgeLabel = updater.updateAvailable ? "新" : nil
+        if mainWin != nil { adjustMainHeight() }
+    }
+
     func refreshMain() {
         refreshPermissions()
         let keep = (winPopup.selectedItem?.representedObject as? UInt32)
@@ -551,21 +662,7 @@ extension AppDelegate {
         pinScroll.isHidden = n == 0
         pinTable.reloadData()
         pinTableHeight.constant = CGFloat(n) * (pinTable.rowHeight + pinTable.intercellSpacing.height)
-        // 窗口高度：用户没手动调过高度时随内容增减；调过则只保证不小于内容所需的最小高度
-        if let w = mainWin {
-            mainStack.layoutSubtreeIfNeeded()
-            let needH = mainStack.fittingSize.height
-            let curH = w.contentLayoutRect.height
-            let followContent = abs(curH - lastFitHeight) < 2
-            lastFitHeight = needH
-            w.contentMinSize = NSSize(width: 440, height: needH)
-            if followContent || curH < needH {
-                let old = w.frame
-                w.setContentSize(NSSize(width: w.contentLayoutRect.width, height: needH))
-                var f = w.frame; f.origin.y = old.maxY - f.height    // 保持左上角不动
-                w.setFrame(f, display: true)
-            }
-        }
+        adjustMainHeight()
     }
 }
 

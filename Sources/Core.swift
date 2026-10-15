@@ -237,6 +237,51 @@ func listSpaces() -> [SpaceInfo] {
     return out
 }
 
+// MARK: - 版本与更新
+/// GitHub 上一个已发布版本的信息。
+struct ReleaseInfo {
+    let tag: String            // 如 "V1.0.1"
+    let version: String        // 去掉前缀 V/v 后，如 "1.0.1"
+    let pageURL: URL?          // Release 页面
+    let notes: String          // 更新说明（Markdown）
+    let dmgURL: URL            // PinTop.dmg 下载地址
+    let dmgSize: Int           // 字节数，用来校验下载是否完整
+    let sha256: String?        // GitHub 给出的 SHA-256（十六进制），有则校验
+}
+
+/// "V1.2.3" / "v1.2" → [1, 2, 3] / [1, 2]。无法解析的部分按 0 处理。
+func versionParts(_ s: String) -> [Int] {
+    var t = s.trimmingCharacters(in: .whitespaces)
+    if let f = t.first, f == "v" || f == "V" { t.removeFirst() }
+    return t.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+}
+
+/// remote 是否比 local 新。按数字逐段比较（所以 1.10.0 > 1.9.0），位数不同时补 0（1.0 == 1.0.0）。
+func isNewerVersion(_ remote: String, than local: String) -> Bool {
+    let r = versionParts(remote), l = versionParts(local)
+    for i in 0..<max(r.count, l.count) {
+        let a = i < r.count ? r[i] : 0, b = i < l.count ? l[i] : 0
+        if a != b { return a > b }
+    }
+    return false
+}
+
+/// 解析 GitHub `releases/latest` 接口返回的 JSON。草稿和预发布、没有 DMG 附件的都视为无效。
+func parseLatestRelease(_ data: Data) -> ReleaseInfo? {
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let tag = obj["tag_name"] as? String, !tag.isEmpty,
+          (obj["draft"] as? Bool) != true, (obj["prerelease"] as? Bool) != true,
+          let assets = obj["assets"] as? [[String: Any]] else { return nil }
+    let dmgs = assets.filter { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
+    guard let asset = dmgs.first(where: { ($0["name"] as? String) == "PinTop.dmg" }) ?? dmgs.first,
+          let urlStr = asset["browser_download_url"] as? String, let url = URL(string: urlStr) else { return nil }
+    var sha: String? = nil
+    if let d = asset["digest"] as? String, d.lowercased().hasPrefix("sha256:") { sha = String(d.dropFirst(7)).lowercased() }
+    return ReleaseInfo(tag: tag, version: versionParts(tag).map(String.init).joined(separator: "."),
+                       pageURL: (obj["html_url"] as? String).flatMap(URL.init(string:)),
+                       notes: obj["body"] as? String ?? "", dmgURL: url, dmgSize: asset["size"] as? Int ?? 0, sha256: sha)
+}
+
 // MARK: - 拖动排序
 /// 把第 `from` 行拖到“第 `insertionRow` 行之前”（insertionRow 取 0...行数，行数表示拖到最后）后，
 /// 该项在移除自身之后的数组里应处于的下标。

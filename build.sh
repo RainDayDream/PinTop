@@ -19,7 +19,7 @@ rm -rf "$APP"
 mkdir -p "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # 应用图标（由 Resources/make_icon.swift 生成）
-swiftc -O -parse-as-library Sources/Core.swift Sources/App/App.swift -o "$APP/Contents/MacOS/PinTop"
+swiftc -O -parse-as-library Sources/Core.swift Sources/App/App.swift Sources/App/Updater.swift -o "$APP/Contents/MacOS/PinTop"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
