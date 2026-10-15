@@ -5,12 +5,12 @@
 让任意 App 的某个窗口始终显示在其他窗口之上（镜像悬浮），或把它摆到屏幕指定位置（并排布局）。
 带主窗口和菜单栏图标的 App，也提供命令行用法；Swift 编写，不修改任何窗口内容。
 
-## 最新版本：V1.0.0
+## 最新版本：V1.1.0
 
 | | 链接 |
 |---|---|
 | 下载 DMG（最新版） | **[PinTop.dmg](https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg)** |
-| 本版本说明 | [Release V1.0.0](https://github.com/RainDayDream/PinTop/releases/tag/V1.0.0) |
+| 本版本说明 | [Release V1.1.0](https://github.com/RainDayDream/PinTop/releases/tag/V1.1.0) |
 | 所有版本 | [Releases](https://github.com/RainDayDream/PinTop/releases) |
 
 **当前可用功能**
@@ -20,6 +20,7 @@
 - **同时悬浮多个窗口**（可选），「正在悬浮」列表逐行显示、可单独取消，并可**拖动排序**或用下拉框设置每个窗口的悬浮层级顺序。
 - **并排布局**：把窗口摆到屏幕靠右/左/上/下的指定大小，或**自定义位置和大小**（X、Y、宽、高，可读取窗口当前值再微调），可把其他窗口放进剩余区域，随时「恢复原位置」。在主窗口里它是独立于悬浮的一块，放在最下面并用分隔线隔开。
 - **主窗口 + 菜单栏图钉** 两种入口，另提供**命令行**（`pintop`）。
+- **应用内更新**：发现新版本时在主窗口、菜单栏、Dock 提示，点一下即可自动下载、校验、替换并重启。
 - **主窗口可自由调整大小**，内容随窗口自适应，并记住上次的大小和位置。
 
 ## 安装
@@ -45,6 +46,14 @@ curl -fL --retry 3 -o /tmp/PinTop.dmg https://github.com/RainDayDream/PinTop/rel
 
 **首次使用需授权**：在 系统设置 → 隐私与安全性 中给 **PinTop** 打开「辅助功能」和「屏幕录制」（授权屏幕录制后，完全退出并重新打开 PinTop）。
 主窗口顶部会显示两项权限的状态。
+
+**更新**：带「应用内更新」的版本会在启动后以及每 6 小时检查一次 GitHub 上的最新版本，发现新版本时：
+- 主窗口顶部出现横幅「发现新版本 Vx.y.z」，带「更新内容」（打开 Release 页面）和「立即更新」按钮；
+- 菜单栏图钉图标旁出现「↑」，菜单顶部多一项「⬆︎ 发现新版本 … — 点击更新」；
+- Dock 图标出现「新」角标。
+
+点「立即更新」后会自动下载、校验、替换并重启，辅助功能和屏幕录制授权保留。主窗口底部有「检查更新」按钮，也可手动检查。
+更早的、不带更新功能的版本需要用上面的一键安装命令升级一次，之后就可以在 App 内更新。
 
 **卸载**：退出 PinTop，把 `/Applications/PinTop.app` 移到废纸篓；可选：`tccutil reset All com.raindaydream.pintop` 清除授权记录。
 
@@ -115,6 +124,8 @@ macOS（SIP 开启）不允许第三方改变其他 App 窗口的层级：`AXRai
 
 - 不注入代码、不改 SIP/系统设置、不读写窗口内容、不使用抢焦点的私有接口；
 - 使用到的非公开符号都是只读的：`_AXUIElementGetWindow`（把 AX 窗口映射为窗口ID）、`CGSCopyManagedDisplaySpaces`（读取桌面列表）；
+- 应用内更新只访问本仓库的 Release 接口：下载后先核对文件大小和 GitHub 给出的 SHA-256，挂载后再检查 Bundle ID 一致、版本确实更高、代码签名完好，任一项不通过就放弃；
+  替换时先备份旧版，新版复制失败会自动回滚；如果 PinTop 位于不可写的位置（如直接从 DMG 里运行），不会硬替换，而是提示先拖进「应用程序」；
 - 只有「并排布局」的 `--fit` 会改变其他 App 窗口的大小（默认不动），「恢复原位置」可还原。
 
 ## 已知限制
@@ -135,11 +146,15 @@ open build.noindex/PinTop.app
 
 构建使用 ad-hoc 签名并固定指定要求（只认 Bundle ID `com.raindaydream.pintop`），重新构建后系统授权仍然有效。
 
+演示「应用内更新」（不会动「应用程序」里的 PinTop）：`./scripts/demo_update.sh` 会在临时目录启动一份旧版，并让更新源声称有 V9.9.9，你可以看到横幅并点「立即更新」走完整个流程；结束后 `./scripts/demo_update.sh clean` 清理。
+
 代码结构：
 
 ```
 Sources/Core.swift        核心：窗口列表、并排布局、镜像悬浮引擎
 Sources/App/App.swift     App 入口：主窗口 + 菜单栏
+Sources/App/Updater.swift 应用内更新：检查、下载、校验、替换、重启
+scripts/demo_update.sh    演示应用内更新
 Sources/CLI/main.swift    命令行入口
 build.sh                  一键构建（命令行 + App + DMG）
 ```
