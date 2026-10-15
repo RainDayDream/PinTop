@@ -18,6 +18,7 @@ unregister "$APP"
 rm -rf "$APP"
 mkdir -p "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # 应用图标（由 Resources/make_icon.swift 生成）
 swiftc -O -parse-as-library Sources/Core.swift Sources/App/App.swift -o "$APP/Contents/MacOS/PinTop"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -28,6 +29,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>PinTop</string>
     <key>CFBundleIdentifier</key><string>com.raindaydream.pintop</string>
     <key>CFBundleExecutable</key><string>PinTop</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.2.1</string>
     <key>CFBundleVersion</key><string>0.2.1</string>

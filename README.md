@@ -1,3 +1,5 @@
+<p align="center"><img src="Resources/icon.png" width="128" alt="PinTop 图标"></p>
+
 # PinTop — macOS 窗口悬浮 / 并排工具
 
 让任意 App 的某个窗口始终显示在其他窗口之上（镜像悬浮），或把它摆到屏幕指定位置（并排布局）。
