@@ -50,6 +50,7 @@ rm -rf "$STAGE" $OUT/PinTop.dmg
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+cp "Resources/首次打开说明.txt" "$STAGE/首次打开说明.txt"      # 遇到“Apple 无法验证”提示时，在 DMG 里就能看到怎么放行
 hdiutil create -volname "PinTop" -srcfolder "$STAGE" -ov -format UDZO $OUT/PinTop.dmg >/dev/null
 rm -rf "$STAGE"
 unregister "$STAGE/PinTop.app"      # 打包用的临时副本不应留在登记表里

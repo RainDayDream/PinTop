@@ -42,11 +42,35 @@ curl -fL --retry 3 -o /tmp/PinTop.dmg https://github.com/RainDayDream/PinTop/rel
 **手动安装**：
 1. 下载 **[PinTop.dmg（最新版）](https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg)**，或到 [Releases 页面](https://github.com/RainDayDream/PinTop/releases) 选择版本；
 2. 双击 DMG，把 **PinTop** 拖到 **Applications**；
-3. 首次打开：在「应用程序」里**右键 PinTop → 打开**（本 App 未经苹果公证，浏览器下载的文件会被系统提示“无法验证开发者”）；
-   或在终端运行 `xattr -dr com.apple.quarantine /Applications/PinTop.app` 后再打开。
+3. **首次打开会被系统拦下**，见下面「首次打开提示怎么办」。
+
+### 首次打开提示「Apple 无法验证“PinTop.app”…」怎么办
+
+从浏览器下载的 PinTop 第一次打开时，macOS 会弹出：
+
+> 未打开“PinTop.app”：Apple 无法验证“PinTop.app”是否包含可能危害 Mac 安全或泄漏隐私的恶意软件。
+
+**这是 macOS 的 Gatekeeper 对所有未经苹果公证的 App 的统一拦截，不是 PinTop 有问题。** 公证需要加入苹果的付费开发者计划，PinTop 目前没有；它是开源的，源码都在本仓库里，可以自行查看和编译。
+
+任选一种方式放行（只需要做一次）：
+
+- **最省事（推荐）**：在「终端」里运行下面这一行，再正常打开 PinTop：
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/PinTop.app
+  ```
+- **在系统设置里放行（macOS 15 Sequoia 及更新，含 macOS 26）**：
+  1. 双击 PinTop，在弹窗里点 **「完成」**（不要点“移到废纸篓”）；
+  2. 打开 **系统设置 → 隐私与安全性**，向下滚动到 **「安全性」**；
+  3. 找到“已阻止使用“PinTop”以保护 Mac”，点 **「仍要打开」**，输入开机密码或 Touch ID；
+  4. 再点一次 **「打开」**。
+  > “仍要打开”只在你尝试打开之后的一小段时间内出现；没看到就再双击一次 PinTop，然后立刻回到这里。
+- **macOS 14 及更早**：在「应用程序」里右键 PinTop → **打开** → 再点 **打开**。
+
+> 为什么 macOS 15 之后“右键 → 打开”不管用了？苹果在 macOS 15 里去掉了这个绕过方式，只剩上面「系统设置」那条路径。
+> 用上面的**终端一键安装**命令安装则完全不会出现这个提示：`curl` 下载的文件不带系统的“隔离”标记，Gatekeeper 不会检查它。
 
 **首次使用需授权**：在 系统设置 → 隐私与安全性 中给 **PinTop** 打开「辅助功能」和「屏幕录制」（授权屏幕录制后，完全退出并重新打开 PinTop）。
-主窗口顶部会显示两项权限的状态。
+主窗口底部的「权限」按钮可以查看两项权限的状态；缺权限时，窗口顶部会出现橙色提示条和对应的授权按钮。
 
 **更新**：带「应用内更新」的版本会在启动后以及每 6 小时检查一次 GitHub 上的最新版本，发现新版本时：
 - 主窗口顶部出现横幅「发现新版本 Vx.y.z」，带「更新内容」（打开 Release 页面）和「立即更新」按钮；

@@ -1,0 +1,26 @@
+PinTop 首次打开说明
+====================
+
+把 PinTop 拖到「应用程序」后，第一次打开如果看到：
+
+    未打开“PinTop.app”
+    Apple 无法验证“PinTop.app”是否包含可能危害 Mac 安全或泄漏隐私的恶意软件。
+
+这是 macOS 对所有“未经苹果公证”的 App 的统一拦截，不是 PinTop 有问题
+（公证需要付费的苹果开发者账号；PinTop 是开源的：https://github.com/RainDayDream/PinTop ）。
+只需要放行一次，任选一种方式：
+
+方式一（最省事）：打开“终端”，运行下面这一行，然后正常打开 PinTop：
+
+    xattr -dr com.apple.quarantine /Applications/PinTop.app
+
+方式二（macOS 15 Sequoia 及更新，包括 macOS 26）：
+  1. 双击 PinTop，在弹窗里点“完成”（不要点“移到废纸篓”）
+  2. 打开 系统设置 → 隐私与安全性，向下滚动到“安全性”
+  3. 找到“已阻止使用“PinTop”以保护 Mac”，点“仍要打开”，输入开机密码或 Touch ID
+  4. 再点一次“打开”
+  （“仍要打开”只在尝试打开之后的一小段时间内出现；没看到就再双击一次 PinTop）
+
+方式三（macOS 14 及更早）：在“应用程序”里右键 PinTop → 打开 → 再点“打开”。
+
+首次使用还需要在 系统设置 → 隐私与安全性 里给 PinTop 打开“辅助功能”和“屏幕录制”。
