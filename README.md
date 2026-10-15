@@ -5,12 +5,12 @@
 让任意 App 的某个窗口始终显示在其他窗口之上（镜像悬浮），或把它摆到屏幕指定位置（并排布局）。
 带主窗口和菜单栏图标的 App，也提供命令行用法；Swift 编写，不修改任何窗口内容。
 
-## 最新版本：V1.2.0
+## 最新版本：V1.2.1
 
 | | 链接 |
 |---|---|
 | 下载 DMG（最新版） | **[PinTop.dmg](https://github.com/RainDayDream/PinTop/releases/latest/download/PinTop.dmg)** |
-| 本版本说明 | [Release V1.2.0](https://github.com/RainDayDream/PinTop/releases/tag/V1.2.0) |
+| 本版本说明 | [Release V1.2.1](https://github.com/RainDayDream/PinTop/releases/tag/V1.2.1) |
 | 所有版本 | [Releases](https://github.com/RainDayDream/PinTop/releases) |
 
 **当前可用功能**
